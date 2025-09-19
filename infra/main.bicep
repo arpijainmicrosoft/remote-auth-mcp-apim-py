@@ -26,6 +26,17 @@ param environmentName string
   }
 })
 param location string
+
+@minLength(1)
+@maxLength(64)
+@description('Service Tree ID to associate the Entra application.')
+param serviceTreeId string
+
+@minLength(1)
+@maxLength(64)
+@description('Give a unique app name for your MCP server.')
+param mcpServerAppName string
+
 param vnetEnabled bool
 param apiServiceName string = ''
 param apiUserAssignedIdentityName string = ''
@@ -36,7 +47,6 @@ param resourceGroupName string = ''
 param storageAccountName string = ''
 param vNetName string = ''
 param disableLocalAuth bool = true
-param mcpServerName string = 'Mini MCP Server'
 
 // MCP Client APIM gateway specific variables
 var abbrs = loadJsonContent('./abbreviations.json')
@@ -93,14 +103,15 @@ module oauthAPIModule './app/apim-oauth/oauth.bicep' = {
   params: {
     location: location
     entraResourceAppUniqueName: 'mcp-obo-resource-oauth--${abbrs.applications}${apimResourceToken}'
-    entraResourceAppDisplayName: mcpServerName
+    entraResourceAppDisplayName: mcpServerAppName
     apimServiceName: apimService.name
     entraAppUserAssignedIdentityPrincipleId: apimService.outputs.entraAppUserAssignedIdentityPrincipleId
     entraAppUserAssignedIdentityClientId: apimService.outputs.entraAppUserAssignedIdentityClientId
-    mcpServerName: mcpServerName
+    mcpServerName: mcpServerAppName
     cosmosDbEndpoint: cosmosDb.outputs.cosmosDbEndpoint
     cosmosDbDatabaseName: cosmosDb.outputs.databaseName
     cosmosDbContainerName: cosmosDb.outputs.containerName
+    serviceTreeId: serviceTreeId
   }
   dependsOn: [
     apimCosmosDbRoleAssignment

@@ -4,6 +4,21 @@ This sample shows how to deploy an Entra ID-protected MCP server on Azure.
 
 The sample also uses an authorization pattern where the client acquires a token _for the MCP server_ first, and then uses [on-behalf-of flow](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-on-behalf-of-flow) to exchange it for a token that can be used with [Microsoft Graph](https://learn.microsoft.com/graph/overview). It does all this in an entirely secretless manner too.
 
+## Proof Of Concept - Run in MSFT Tenant
+```
+az login
+
+az account set --subscription 'Hackathon Playground'
+
+az provider register --namespace Microsoft.App --wait
+
+azd auth login
+
+azd up
+
+npx --registry=https://registry.npmjs.org @modelcontextprotocol/inspector@0.9.0
+```
+
 ## ⚠️ Important: Experimental Implementation
 
 >[!IMPORTANT]

@@ -15,6 +15,9 @@ param userAssignedIdentityPrincipleId string
 @description('The OAuth callback URL for the API Management service')
 param apimOauthCallback string
 
+@description('Service Tree ID for the application')
+param serviceTreeId string
+
 var loginEndpoint = environment().authentication.loginEndpoint
 var issuer = '${loginEndpoint}${tenantId}/v2.0'
 
@@ -22,6 +25,7 @@ resource entraResourceApp 'Microsoft.Graph/applications@v1.0' = {
 
   displayName: entraAppDisplayName
   uniqueName: entraAppUniqueName
+  serviceManagementReference: serviceTreeId
 
   web: {
     redirectUris: [
@@ -38,6 +42,7 @@ resource entraResourceApp 'Microsoft.Graph/applications@v1.0' = {
         }
       ]
     }
+
   ]
 
   resource fic 'federatedIdentityCredentials@v1.0' = {
@@ -57,6 +62,8 @@ var identifierUri = 'api://${entraResourceApp.appId}'
 resource appWithIdentifierUris 'Microsoft.Graph/applications@v1.0' = {
   displayName: entraResourceApp.displayName
   uniqueName: entraAppUniqueName
+  serviceManagementReference: serviceTreeId
+
   identifierUris: [
     identifierUri
   ]
@@ -72,12 +79,17 @@ resource applicationRegistrationServicePrincipal 'Microsoft.Graph/servicePrincip
   appId: appWithIdentifierUris.appId
 }
 
+// Commenting out since I do not have Admin Permissions to perform operations on MS Graph
+/*
 resource grants 'Microsoft.Graph/oauth2PermissionGrants@v1.0' = {
   clientId: applicationRegistrationServicePrincipal.id
   consentType: 'AllPrincipals'
   resourceId: microsoftGraphServicePrincipal.id
   scope: 'User.Read'
 }
+*/
+// Adding an output to help with manual permission granting later
+output appRegistrationName string = appWithIdentifierUris.displayName
 
 // Outputs
 output entraAppId string = appWithIdentifierUris.appId
