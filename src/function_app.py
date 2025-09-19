@@ -17,6 +17,8 @@ application_uami = os.environ.get('APPLICATION_UAMI', 'Not set')
 application_cid = os.environ.get('APPLICATION_CID', 'Not set')
 application_tenant = os.environ.get('APPLICATION_TENANT', 'Not set')
 
+application_secret = os.environ.get('APPLICATION_SECRET', 'Not set')
+
 managed_identity = msal.UserAssignedManagedIdentity(client_id=application_uami)
 
 mi_auth_client = msal.ManagedIdentityClient(managed_identity, http_client=requests.Session())
@@ -183,6 +185,13 @@ cca_auth_client = msal.ConfidentialClientApplication(
     client_credential={"client_assertion": get_managed_identity_token('api://AzureADTokenExchange')}
 )
 
+# Replace your existing cca_auth_client initialization
+cca_auth_client_using_static_secret = msal.ConfidentialClientApplication(
+    application_cid, 
+    authority=f'https://login.microsoftonline.com/{application_tenant}',
+    client_credential=application_secret  # Use the secret directly
+)
+
 @app.generic_trigger(
     arg_name="context",
     type="mcpToolTrigger",
@@ -235,9 +244,10 @@ def list_resource_groups(context) -> str:
                 is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
                 
                 if is_valid:
-                    # Use On-Behalf-Of flow with the validated user's token
-                    result = cca_auth_client.acquire_token_on_behalf_of(
-                        user_assertion=bearer_token,
+                    # Use static secret based client for token acquisition.
+                    # Not using the OBO flow here because admin consent is not provided for the app.
+                    # "error": "AADSTS65001: The user or administrator has not consented to use the application with ID 'ddad3aee-d646-4ccc-a3ae-acc9f2ff237f' named 'arpijainmcp05'. Send an interactive authorization request for this user and resource. Trace ID: cdc64abe-5053-4788-a2f9-2d93c1e7de00 Correlation ID: f999d0be-b438-4cbf-a902-e577e8cad657 Timestamp: 2025-09-19 08:25:30Z"
+                    result = cca_auth_client_using_static_secret.acquire_token_for_client(
                         scopes=['https://management.azure.com/.default']
                     )
                 else:
