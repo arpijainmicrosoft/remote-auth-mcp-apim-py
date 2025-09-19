@@ -8,6 +8,7 @@ import jwt
 from jwt.exceptions import PyJWTError
 
 import azure.functions as func
+from azure.mgmt.resource import ResourceManagementClient
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -181,6 +182,134 @@ cca_auth_client = msal.ConfidentialClientApplication(
     authority=f'https://login.microsoftonline.com/{application_tenant}',
     client_credential={"client_assertion": get_managed_identity_token('api://AzureADTokenExchange')}
 )
+
+@app.generic_trigger(
+    arg_name="context",
+    type="mcpToolTrigger",
+    toolName="list_resource_groups",
+    description="List all resource groups in the specified subscription.",
+    toolProperties="[]",
+    # toolProperties="[{\"name\": \"subscription_id\", \"description\": \"Azure subscription ID (GUID format)\", \"type\": \"string\", \"required\": true}]",
+)
+def list_resource_groups(context) -> str:
+    """
+    List all resource groups in the specified subscription.
+    
+    Args:
+        context: The trigger context as a JSON string containing the request information.
+                Expected to contain 'subscription_id' in the arguments.
+        
+    Returns:
+        JSON string with list of resource groups or error information.
+    """
+    
+    token_error = None
+    resource_group_data = None
+    
+    try:
+        logging.info(f"Context type: {type(context).__name__}")
+        try:
+            context_obj = json.loads(context)
+            arguments = context_obj.get('arguments', {})
+            bearer_token = None
+            subscription_id = None
+            logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
+            
+            if isinstance(arguments, dict):
+                bearer_token = arguments.get('bearerToken')
+                # subscription_id = arguments.get('subscription_id')
+                subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
+            
+            if not bearer_token:
+                logging.warning("No bearer token found in context arguments")
+                token_acquired = False
+                token_error = "No bearer token found in context arguments"
+            elif not subscription_id:
+                logging.warning("No subscription_id found in context arguments")
+                return json.dumps({
+                    "error": "Missing required parameter: subscription_id",
+                    "status": "Failed"
+                }, indent=2)
+            else:
+                expected_audience = f"{application_cid}"
+                is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
+                
+                if is_valid:
+                    # Use On-Behalf-Of flow with the validated user's token
+                    result = cca_auth_client.acquire_token_on_behalf_of(
+                        user_assertion=bearer_token,
+                        scopes=['https://management.azure.com/.default']
+                    )
+                else:
+                    token_acquired = False
+                    token_error = validation_error
+                    result = {"error": "invalid_token", "error_description": validation_error}
+                
+                if "access_token" in result:
+                    logging.info("Successfully acquired access token using OBO flow")
+                    token_acquired = True
+                    access_token = result["access_token"]
+                    token_error = None
+                    
+                    # Use the token to call Resource Management API
+                    try:
+                        # Create an authentication object for Resouce Management
+                        headers = {
+                            'Authorization': f'Bearer {access_token}',
+                            'Content-Type': 'application/json'
+                        }
+                        
+                        # Get the resource groups
+                        resource_groups_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourcegroups?api-version=2021-04-01'
+                        response = requests.get(resource_groups_url, headers=headers)
+                        
+                        if response.status_code == 200:
+                            resource_group_data = response.json()
+                            logging.info("Successfully retrieved resource group data")
+                        else:
+                            logging.error(f"Failed to get resource group data: {response.status_code}, {response.text}")
+                            token_error = f"Resource Management API error: {response.status_code}"
+                    except Exception as ex:
+                        logging.error(f"Error calling Resource Management API: {str(ex)}")
+                        token_error = f"Resoure Management error: {str(ex)}"
+                else:
+                    token_acquired = False
+                    token_error = result.get('error_description', 'Unknown error acquiring token')
+                    logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
+        except Exception as e:
+            token_acquired = False
+            token_error = str(e)
+            logging.error(f"Exception when acquiring token: {token_error}")
+
+        # Prepare the response
+        try:
+            response = {}
+            
+            if resource_group_data:
+                # Return resource group data as the primary content
+                response = resource_group_data
+                # Add status information
+                response['success'] = True
+            else:
+                # If we failed to get resource group data, return error information
+                response['success'] = False
+                response['error'] = token_error or "Failed to retrieve resource group data"
+            
+            logging.info(f"Returning response: {json.dumps(response)[:500]}...")
+            return json.dumps(response, indent=2)
+        except Exception as format_error:
+            logging.error(f"Error formatting response: {str(format_error)}")
+            return json.dumps({
+                "success": False,
+                "error": f"Error formatting response: {str(format_error)}"
+            }, indent=2)
+    except Exception as e:
+        stack_trace = traceback.format_exc()
+        return json.dumps({
+            "error": f"An error occurred: {str(e)}\n{stack_trace}",
+            "stack_trace": stack_trace,
+            "raw_context": str(context)
+        }, indent=2)
 
 @app.generic_trigger(
     arg_name="context",
