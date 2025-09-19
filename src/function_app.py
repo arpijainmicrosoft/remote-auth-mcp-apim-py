@@ -320,6 +320,155 @@ def list_resource_groups(context) -> str:
             "stack_trace": stack_trace,
             "raw_context": str(context)
         }, indent=2)
+    
+@app.generic_trigger(
+    arg_name="context",
+    type="mcpToolTrigger",
+    toolName="create_storage_mover",
+    description="Create a StorageMover resource with the specified parameters using Azure SDK.",
+    toolProperties="[]",
+)
+def create_storage_mover(context) -> str:
+    """
+    Create a StorageMover resource with the specified parameters using Azure SDK.
+    
+    Args:
+        context: The trigger context as a JSON string containing the request information.
+                Expected to contain 'subscription_id' in the arguments.
+        
+    Returns:
+        JSON string with resource creation details, error information, or parameter guidance.
+    """
+    
+    token_error = None
+    resource_group_data = None
+    
+    try:
+        logging.info(f"Context type: {type(context).__name__}")
+        try:
+            context_obj = json.loads(context)
+            arguments = context_obj.get('arguments', {})
+            bearer_token = None
+            subscription_id = None
+            name = None
+            location = None
+            resource_group = None
+            logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
+            
+            if isinstance(arguments, dict):
+                bearer_token = arguments.get('bearerToken')
+                # subscription_id = arguments.get('subscription_id')
+                subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
+                name = 'arpijain-hackathon-mover-01'
+                location = 'eastus'
+                resource_group = 'sunidhi'
+            
+            if not bearer_token:
+                logging.warning("No bearer token found in context arguments")
+                token_acquired = False
+                token_error = "No bearer token found in context arguments"
+            elif not subscription_id:
+                logging.warning("No subscription_id found in context arguments")
+                return json.dumps({
+                    "error": "Missing required parameter: subscription_id",
+                    "status": "Failed"
+                }, indent=2)
+            else:
+                expected_audience = f"{application_cid}"
+                is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
+                
+                if is_valid:
+                    # Use static secret based client for token acquisition.
+                    # Not using the OBO flow here because admin consent is not provided for the app.
+                    # "error": "AADSTS65001: The user or administrator has not consented to use the application with ID 'ddad3aee-d646-4ccc-a3ae-acc9f2ff237f' named 'arpijainmcp05'. Send an interactive authorization request for this user and resource. Trace ID: cdc64abe-5053-4788-a2f9-2d93c1e7de00 Correlation ID: f999d0be-b438-4cbf-a902-e577e8cad657 Timestamp: 2025-09-19 08:25:30Z"
+                    result = cca_auth_client_using_static_secret.acquire_token_for_client(
+                        scopes=['https://management.azure.com/.default']
+                    )
+                else:
+                    token_acquired = False
+                    token_error = validation_error
+                    result = {"error": "invalid_token", "error_description": validation_error}
+                
+                if "access_token" in result:
+                    logging.info("Successfully acquired access token using OBO flow")
+                    token_acquired = True
+                    access_token = result["access_token"]
+                    token_error = None
+                    
+                    # Use the token to call Resource Management API
+                    try:
+                        # Create an authentication object for Resouce Management
+                        headers = {
+                            'Authorization': f'Bearer {access_token}',
+                            'Content-Type': 'application/json'
+                        }
+                        
+                        # Define the Storage Mover resource body
+                        storage_mover_body = {
+                            "location": location,
+                            "tags": {
+                                "created_by": "mcp_tool",
+                                "purpose": "hackathon"
+                            },
+                            "properties": {
+                                "description": f"Storage Mover created via MCP tool for hackathon"
+                            }
+                        }
+                        
+                        # Create the Storage Mover using REST API
+                        # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/storage-movers/create-or-update
+                        storage_mover_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}?api-version=2023-10-01'
+                        
+                        logging.info(f"Creating Storage Mover at URL: {storage_mover_url}")
+                        response = requests.put(storage_mover_url, headers=headers, json=storage_mover_body)
+                        
+                        if response.status_code == 200:
+                            resource_group_data = response.json()
+                            logging.info("Successfully retrieved resource group data")
+                        else:
+                            logging.error(f"Failed to get resource group data: {response.status_code}, {response.text}")
+                            token_error = f"Resource Management API error: {response.status_code}"
+                    except Exception as ex:
+                        logging.error(f"Error calling Resource Management API: {str(ex)}")
+                        token_error = f"Resoure Management error: {str(ex)}"
+                else:
+                    token_acquired = False
+                    token_error = result.get('error_description', 'Unknown error acquiring token')
+                    logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
+        except Exception as e:
+            token_acquired = False
+            token_error = str(e)
+            logging.error(f"Exception when acquiring token: {token_error}")
+
+        # Prepare the response
+        try:
+            response = {}
+            
+            if resource_group_data:
+                # Return resource group data as the primary content
+                response = resource_group_data
+                # Add status information
+                response['success'] = True
+            else:
+                # If we failed to get resource group data, return error information
+                response['success'] = False
+                response['error'] = token_error or "Failed to retrieve resource group data"
+            
+            logging.info(f"Returning response: {json.dumps(response)[:500]}...")
+            return json.dumps(response, indent=2)
+        except Exception as format_error:
+            logging.error(f"Error formatting response: {str(format_error)}")
+            return json.dumps({
+                "success": False,
+                "error": f"Error formatting response: {str(format_error)}"
+            }, indent=2)
+    except Exception as e:
+        stack_trace = traceback.format_exc()
+        return json.dumps({
+            "error": f"An error occurred: {str(e)}\n{stack_trace}",
+            "stack_trace": stack_trace,
+            "raw_context": str(context)
+        }, indent=2)
 
 @app.generic_trigger(
     arg_name="context",
