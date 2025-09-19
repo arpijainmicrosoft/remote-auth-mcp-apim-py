@@ -19,6 +19,31 @@ azd up
 npx --registry=https://registry.npmjs.org @modelcontextprotocol/inspector@0.9.0
 ```
 
+----
+
+Steps for the static secret that needs to be created for this to work
+
+Secret Creation
+1. Go to the entra app that you created
+2. Create a new client secret
+3. Copy the secret "value" (not the Id). You will not see it again
+
+![Secret Creation](./media/add-client-secret-to-entra-app.jpeg)
+
+Add secret as an env variable in the function app
+1. Go to the function app that you created
+2. Go to Settings -> Environment Variables
+3. Add a new key: Name: APPLICATION_SECRET; and Value: Secret value copied in step#3 previously
+
+![Add Secrets as Env Var](./media/function-app-add-secret-as-env-variable.jpeg)
+
+Provide app Contributor role in the Subscription
+1. Go to subscription and open the IAM blade
+2. Add new role Contributor and search your app using "name"
+3. Select the service principal for your app and assign the role
+
+![Contributor role for the app](./media/contributor-permission-for-entra-app.jpeg)
+
 ## ⚠️ Important: Experimental Implementation
 
 >[!IMPORTANT]
