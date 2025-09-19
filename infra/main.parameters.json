@@ -8,6 +8,12 @@
     "location": {
       "value": "${AZURE_LOCATION}"
     },
+    "serviceTreeId": {
+      "value": "${SERVICE_TREE_ID}"
+    },
+    "mcpServerAppName": {
+      "value": "${MCP_SERVER_APP_NAME}"
+    },
     "vnetEnabled": {
       "value": "${VNET_ENABLED=true}"
     },

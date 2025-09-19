@@ -28,6 +28,9 @@ param cosmosDbDatabaseName string
 @description('The CosmosDB container name for client registrations')
 param cosmosDbContainerName string
 
+@description('Service Tree ID for the application')
+param serviceTreeId string
+
 resource apimService 'Microsoft.ApiManagement/service@2021-08-01' existing = {
   name: apimServiceName
 }
@@ -42,6 +45,7 @@ module entraResourceApp './entra-resource-app.bicep' = {
     entraAppDisplayName: entraResourceAppDisplayName
     userAssignedIdentityPrincipleId: entraAppUserAssignedIdentityPrincipleId
     apimOauthCallback: '${apimService.properties.gatewayUrl}/oauth-callback'
+    serviceTreeId: serviceTreeId
   }
 }
 
