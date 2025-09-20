@@ -4,6 +4,10 @@
 
 azure-functions
 azure-mgmt-resource
+azure-mgmt-storage
+azure-mgmt-storagemover
+azure-storage-blob
+azure-identity
 requests
 msal
 PyJWT

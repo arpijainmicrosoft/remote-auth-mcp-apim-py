@@ -11,6 +11,11 @@ from jwt.exceptions import PyJWTError
 
 import azure.functions as func
 from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.storage import StorageManagementClient
+from azure.mgmt.storagemover import StorageMoverMgmtClient
+from azure.storage.blob import BlobServiceClient
+from azure.identity import ClientSecretCredential
+from azure.core.credentials import AccessToken
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -24,6 +29,16 @@ application_secret = os.environ.get('APPLICATION_SECRET', 'Not set')
 managed_identity = msal.UserAssignedManagedIdentity(client_id=application_uami)
 
 mi_auth_client = msal.ManagedIdentityClient(managed_identity, http_client=requests.Session())
+
+# Custom credential class to use the bearer token from context
+class BearerTokenCredential:
+    def __init__(self, access_token, expires_on=None):
+        self.access_token = access_token
+        # Set expiry to 1 hour from now if not provided
+        self.expires_on = expires_on or (datetime.now().timestamp() + 3600)
+    
+    def get_token(self, *scopes, **kwargs):
+        return AccessToken(self.access_token, int(self.expires_on))
 
 # Define the token function before using it
 def get_managed_identity_token(audience):
@@ -547,48 +562,53 @@ def create_aws_storage_migration(context) -> str:
                 if "access_token" in result:
                     logging.info("Successfully acquired access token using OBO flow")
                     access_token = result["access_token"]
+
+                    # Create an authentication object
+                    headers = {
+                        'Authorization': f'Bearer {access_token}',
+                        'Content-Type': 'application/json'
+                    }
+
+                    # Create credential object for SDK clients
+                    credential = BearerTokenCredential(access_token)
                     
                     # Use the token to call Resource Management API
                     try:
-                        # Create an authentication object for Resouce Management
-                        headers = {
-                            'Authorization': f'Bearer {access_token}',
-                            'Content-Type': 'application/json'
-                        }
-                        
-                        # Define the Storage Mover resource body
-                        storage_mover_body = {
-                            "location": location,
-                            "tags": {
-                                "created_by": "mcp_tool",
-                                "purpose": "hackathon"
-                            },
-                            "properties": {
-                                "description": f"Storage Mover created via MCP tool for hackathon"
-                            }
-                        }
-                        
+
                         ################################################################################
                         ##################### STEP 1: Create a Storage Mover ###########################
                         ################################################################################
 
-                        # Create the Storage Mover using REST API
-                        # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/storage-movers/create-or-update
-                        storage_mover_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}?api-version=2023-10-01'
+                        # Initialize StorageMover client
+                        storage_mover_client = StorageMoverMgmtClient(
+                            credential=credential,
+                            subscription_id=subscription_id
+                        )
                         
-                        logging.info(f"[Storage-Mover-Create] Creating Storage Mover at URL: {storage_mover_url}")
-                        storage_mover_response = requests.put(storage_mover_url, headers=headers, json=storage_mover_body)
+                        # Define the Storage Mover properties                        
+                        from azure.mgmt.storagemover.models import StorageMover  # Import locally to avoid module-level issues
+                        storage_mover_properties = StorageMover(
+                            location=location,
+                            tags={},
+                            description=f"StorageMover resource created via MCP server"
+                        )
                         
-                        if storage_mover_response.status_code == 200:
-                            storage_mover_data = storage_mover_response.json()
+                        try:
+                            logging.info(f"[Storage-Mover-Create] Creating Storage Mover: {name}")
+                            storage_mover_data = storage_mover_client.storage_movers.create_or_update(
+                                resource_group_name=resource_group,
+                                storage_mover_name=name,
+                                storage_mover=storage_mover_properties
+                            )
+
                             logging.info("[Storage-Mover-Create] Successfully created Storage Mover")
-                        else:
-                            logging.error(f"[Storage-Mover-Create] Failed to create Storage Mover: {storage_mover_response.status_code}, {storage_mover_response.text}")
+                        except Exception as ex:
+                            logging.error(f"[Storage-Mover-Create] Exception creating Storage Mover: {str(ex)}")
                             return json.dumps({
-                                "error": f"Storage Mover API error: {storage_mover_response.status_code}",
-                                "details": storage_mover_response.text,
+                                "error": f"Storage Mover creation exception: {str(ex)}",
                                 "status": "Failed"
                             }, indent=2)
+                        
                         ######################### STEP 1 END ###############################
 
                         ################################################################################
@@ -597,34 +617,33 @@ def create_aws_storage_migration(context) -> str:
 
                         project_name = f"project-{datetimeSuffix}"
 
-                        # Define the Project resource body
-                        project_body = {
-                            "properties": {
-                                "description": f"Project for StorageMover {name}"
-                            }
-                        }
-
-                        # Create the Project using REST API
-                        # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/projects/create-or-update
-                        project_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}/projects/{project_name}?api-version=2023-10-01'
-
-                        logging.info(f"[Storage-Mover-Project-Create] Creating Storage Mover Project at URL: {project_url}")
-                        project_response = requests.put(project_url, headers=headers, json=project_body)
-
-                        if project_response.status_code in [200, 201]:
-                            project_data = project_response.json()
+                        from azure.mgmt.storagemover.models import Project
+        
+                        project_params = Project(
+                            description=f"Project for StorageMover {name}"
+                        )
+                        
+                        # Create the project
+                        try:
+                            project_data = storage_mover_client.projects.create_or_update(
+                                resource_group_name=resource_group,
+                                storage_mover_name=name,
+                                project_name=project_name,
+                                project=project_params
+                            )
                             logging.info("[Storage-Mover-Project-Create] Successfully created Storage Mover Project")
-                        else:
-                            logging.error(f"[Storage-Mover-Project-Create] Failed to create Storage Mover Project: {project_response.status_code}, {project_response.text}")
+                        except Exception as ex:
+                            logging.error(f"[Storage-Mover-Project-Create] Exception creating Storage Mover Project: {str(ex)}")
                             return json.dumps({
-                                "error": f"Storage Mover Project API error: {project_response.status_code} - {project_response.text}",
+                                "error": f"Storage Mover Project creation exception: {str(ex)}",
                                 "status": "Failed"
                             }, indent=2)
+                        
                         ######################### STEP 2 END ###############################
 
 
                         ################################################################################
-                        ############### STEP 3: Create a Storage Account with Container ################
+                        ####################### STEP 3: Create a Storage Account #######################
                         ################################################################################
 
                         # Generate storage account name with timestamp suffix
@@ -733,7 +752,7 @@ def create_aws_storage_migration(context) -> str:
                                 "status": "Failed"
                             }, indent=2)
 
-                        ######################### STEP 3 END ###############################
+                        ############################ STEP 3 END #######################################
 
                     except Exception as ex:
                         logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
@@ -759,8 +778,8 @@ def create_aws_storage_migration(context) -> str:
         try:
             response = {}
             
-            response['storage_mover_data'] = storage_mover_data
-            response['project_data'] = project_data
+            response['storage_mover_data'] = storage_mover_data.as_dict()
+            response['project_data'] = project_data.as_dict()
             response['storage_account_data'] = storage_account_data
             response['success'] = True
             
