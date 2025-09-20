@@ -497,6 +497,7 @@ def create_aws_storage_migration(context) -> str:
     
     storage_mover_data = None
     project_data = None
+    storage_account_data = None
     
     try:
         logging.info(f"Context type: {type(context).__name__}")
@@ -504,6 +505,7 @@ def create_aws_storage_migration(context) -> str:
             context_obj = json.loads(context)
             arguments = context_obj.get('arguments', {})
             bearer_token = None
+            datetimeSuffix = None
             subscription_id = None
             name = None
             location = None
@@ -512,9 +514,9 @@ def create_aws_storage_migration(context) -> str:
             
             if isinstance(arguments, dict):
                 bearer_token = arguments.get('bearerToken')
-                randomSuffix = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+                datetimeSuffix = datetime.now().strftime("%Y-%m-%d-%H%M%S")
                 subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
-                name = f"arpijain-hackathon-mover-{randomSuffix}"
+                name = f"arpijain-hackathon-mover-{datetimeSuffix}"
                 location = 'eastus'
                 resource_group = 'arpijain-aws-storage-mover-test-01'
             
@@ -574,16 +576,17 @@ def create_aws_storage_migration(context) -> str:
                         # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/storage-movers/create-or-update
                         storage_mover_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}?api-version=2023-10-01'
                         
-                        logging.info(f"Creating Storage Mover at URL: {storage_mover_url}")
+                        logging.info(f"[Storage-Mover-Create] Creating Storage Mover at URL: {storage_mover_url}")
                         storage_mover_response = requests.put(storage_mover_url, headers=headers, json=storage_mover_body)
                         
                         if storage_mover_response.status_code == 200:
                             storage_mover_data = storage_mover_response.json()
-                            logging.info("Successfully retrieved resource group data")
+                            logging.info("[Storage-Mover-Create] Successfully created Storage Mover")
                         else:
-                            logging.error(f"Failed to get resource group data: {storage_mover_response.status_code}, {storage_mover_response.text}")
+                            logging.error(f"[Storage-Mover-Create] Failed to create Storage Mover: {storage_mover_response.status_code}, {storage_mover_response.text}")
                             return json.dumps({
-                                "error": f"Resource Management API error: {storage_mover_response.status_code}",
+                                "error": f"Storage Mover API error: {storage_mover_response.status_code}",
+                                "details": storage_mover_response.text,
                                 "status": "Failed"
                             }, indent=2)
                         ######################### STEP 1 END ###############################
@@ -592,8 +595,7 @@ def create_aws_storage_migration(context) -> str:
                         ############### STEP 2: Create a Project for the Storage Mover #################
                         ################################################################################
 
-                        project_guid = str(uuid.uuid4())[:8]
-                        project_name = f"{name}-project-{project_guid}"
+                        project_name = f"project-{datetimeSuffix}"
 
                         # Define the Project resource body
                         project_body = {
@@ -606,24 +608,137 @@ def create_aws_storage_migration(context) -> str:
                         # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/projects/create-or-update
                         project_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}/projects/{project_name}?api-version=2023-10-01'
 
-                        logging.info(f"Creating Storage Mover Project at URL: {project_url}")
+                        logging.info(f"[Storage-Mover-Project-Create] Creating Storage Mover Project at URL: {project_url}")
                         project_response = requests.put(project_url, headers=headers, json=project_body)
 
                         if project_response.status_code in [200, 201]:
                             project_data = project_response.json()
-                            logging.info("Successfully created Storage Mover Project")
+                            logging.info("[Storage-Mover-Project-Create] Successfully created Storage Mover Project")
                         else:
-                            logging.error(f"Failed to create Storage Mover Project: {project_response.status_code}, {project_response.text}")
+                            logging.error(f"[Storage-Mover-Project-Create] Failed to create Storage Mover Project: {project_response.status_code}, {project_response.text}")
                             return json.dumps({
                                 "error": f"Storage Mover Project API error: {project_response.status_code} - {project_response.text}",
                                 "status": "Failed"
                             }, indent=2)
                         ######################### STEP 2 END ###############################
 
+
+                        ################################################################################
+                        ############### STEP 3: Create a Storage Account with Container ################
+                        ################################################################################
+
+                        # Generate storage account name with timestamp suffix
+                        storage_account_name = f"sa{datetimeSuffix.replace('-', '')}"
+                        logging.info(f"[Storage-Account-Create] Generated storage account name: {storage_account_name}")
+
+                        # Define the Storage Account resource body
+                        storage_account_body = {
+                            "sku": {
+                                "name": "Standard_LRS"  # storage_account_type equivalent
+                            },
+                            "kind": "StorageV2",
+                            "location": location,
+                            "properties": {
+                                "accessTier": "Hot",
+                                "supportsHttpsTrafficOnly": True,
+                                "minimumTlsVersion": "TLS1_2",
+                                "allowBlobPublicAccess": False
+                            },
+                            "tags": {
+                                "created_by": "mcp_tool",
+                                "purpose": "hackathon"
+                            }
+                        }
+
+                        # Create the Storage Account using REST API
+                        # API reference: https://docs.microsoft.com/en-us/rest/api/storagerp/storageaccounts/create
+                        storage_account_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.Storage/storageAccounts/{storage_account_name}?api-version=2023-01-01'
+
+                        logging.info(f"[Storage-Account-Create] Creating Storage Account at URL: {storage_account_url}")
+                        storage_account_response = requests.put(storage_account_url, headers=headers, json=storage_account_body)
+
+                        if storage_account_response.status_code in [200, 201, 202]:
+                            # Handle different response types
+                            if storage_account_response.status_code == 202:
+                                # Asynchronous operation - wait a bit then check directly
+                                logging.info("[Storage-Account-Create] Storage account creation started (asynchronous operation)")
+                                
+                                # Polling approach: check with exponential backoff
+                                import time
+                                initial_wait = 5  # Start with 5 seconds
+                                max_wait = 60    # Cap at 60 seconds
+                                max_attempts = 10  # Maximum number of polling attempts
+                                backoff_factor = 1.5  # Multiply wait time by this factor each attempt
+
+                                logging.info(f"[Storage-Account-Create] Polling for storage account creation with backoff...")
+
+                                wait_time = initial_wait
+                                for attempt in range(1, max_attempts + 1):
+                                    logging.info(f"[Storage-Account-Create] Attempt {attempt}/{max_attempts}: Checking if storage account {storage_account_name} was created...")
+                                    check_response = requests.get(storage_account_url, headers=headers)
+                                    
+                                    if check_response.status_code == 200:
+                                        try:
+                                            storage_account_data = check_response.json()
+                                            logging.info(f"[Storage-Account-Create] Successfully created storage account: {storage_account_name}")
+                                            break
+                                        except json.JSONDecodeError:
+                                            logging.info("[Storage-Account-Create] Storage account created successfully (response was non-JSON)")
+                                            storage_account_data = {
+                                                "status": "created",
+                                                "name": storage_account_name,
+                                                "message": "Storage account created successfully"
+                                            }
+                                            break
+                                    elif check_response.status_code == 404:
+                                        # Still being created, continue polling
+                                        if attempt < max_attempts:
+                                            logging.info(f"[Storage-Account-Create] Storage account still creating, waiting {wait_time} seconds before next check...")
+                                            time.sleep(wait_time)
+                                            wait_time = min(wait_time * backoff_factor, max_wait)  # Exponential backoff with cap
+                                        else:
+                                            # Max attempts reached, return partial success
+                                            logging.info("[Storage-Account-Create] Max polling attempts reached, storage account creation still in progress")
+                                            storage_account_data = {
+                                                "status": "creating",
+                                                "name": storage_account_name,
+                                                "message": "Storage account creation initiated, still in progress after polling"
+                                            }
+                                    else:
+                                        # Some other error, break out of loop
+                                        logging.warning(f"[Storage-Account-Create] Unexpected status when checking storage account: {check_response.status_code}")
+                                        storage_account_data = {
+                                            "status": "unknown",
+                                            "name": storage_account_name,
+                                            "message": f"Storage account creation initiated, status check returned {check_response.status_code}"
+                                        }
+                                        break
+                            else:
+                                # Synchronous operation (200 or 201)
+                                try:
+                                    storage_account_data = storage_account_response.json()
+                                    logging.info(f"[Storage-Account-Create] Storage account created synchronously: {storage_account_name}")
+                                except json.JSONDecodeError:
+                                    logging.info(f"[Storage-Account-Create] Storage account created synchronously (response was non-JSON): {storage_account_name}")
+                                    storage_account_data = {
+                                        "status": "created",
+                                        "name": storage_account_name,
+                                        "message": "Storage account created successfully (response was non-JSON)"
+                                    }
+                            
+                        else:
+                            logging.error(f"[Storage-Account-Create] Failed to create Storage Account: {storage_account_response.status_code}, {storage_account_response.text}")
+                            return json.dumps({
+                                "error": f"Storage Account API error: {storage_account_response.status_code} - {storage_account_response.text}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ######################### STEP 3 END ###############################
+
                     except Exception as ex:
-                        logging.error(f"Error calling Resource Management API: {str(ex)}")
+                        logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
                         return json.dumps({
-                                "error": f"Resoure Management error: {str(ex)}",
+                                "error": f"Generic error in aws migration tool steps: {str(ex)}",
                                 "status": "Failed"
                             }, indent=2)
                 else:
@@ -646,6 +761,7 @@ def create_aws_storage_migration(context) -> str:
             
             response['storage_mover_data'] = storage_mover_data
             response['project_data'] = project_data
+            response['storage_account_data'] = storage_account_data
             response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
