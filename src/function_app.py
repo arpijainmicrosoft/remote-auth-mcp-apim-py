@@ -5,6 +5,8 @@ import requests
 import msal
 import traceback
 import jwt
+import uuid
+from datetime import datetime
 from jwt.exceptions import PyJWTError
 
 import azure.functions as func
@@ -453,6 +455,198 @@ def create_storage_mover(context) -> str:
                 # If we failed to get resource group data, return error information
                 response['success'] = False
                 response['error'] = token_error or "Failed to retrieve resource group data"
+            
+            logging.info(f"Returning response: {json.dumps(response)[:500]}...")
+            return json.dumps(response, indent=2)
+        except Exception as format_error:
+            logging.error(f"Error formatting response: {str(format_error)}")
+            return json.dumps({
+                "success": False,
+                "error": f"Error formatting response: {str(format_error)}"
+            }, indent=2)
+    except Exception as e:
+        stack_trace = traceback.format_exc()
+        return json.dumps({
+            "error": f"An error occurred: {str(e)}\n{stack_trace}",
+            "stack_trace": stack_trace,
+            "raw_context": str(context)
+        }, indent=2)
+
+@app.generic_trigger(
+    arg_name="context",
+    type="mcpToolTrigger",
+    toolName="create_aws_storage_migration",
+    description="Create a StorageMover resource to move data from AWS S3 to Azure Blob Storage.",
+    toolProperties="[]",
+)
+def create_aws_storage_migration(context) -> str:
+    """
+    Create a StorageMover resource with the specified parameters using Azure SDK.
+    Also creates a project for the Storage Mover with a unique GUID-based name.
+    Creates a storage account with a container for use with the Storage Mover.
+    Optionally creates an Azure Arc multicloud connector for AWS integration.
+    Optionally creates an AWS S3 source endpoint for the Storage Mover.
+    
+    Args:
+        context: The trigger context as a JSON string containing the request information.
+                Expected to contain 'subscription_id' in the arguments.
+        
+    Returns:
+        JSON string with resource creation details, error information, or parameter guidance.
+    """
+    
+    storage_mover_data = None
+    project_data = None
+    
+    try:
+        logging.info(f"Context type: {type(context).__name__}")
+        try:
+            context_obj = json.loads(context)
+            arguments = context_obj.get('arguments', {})
+            bearer_token = None
+            subscription_id = None
+            name = None
+            location = None
+            resource_group = None
+            logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
+            
+            if isinstance(arguments, dict):
+                bearer_token = arguments.get('bearerToken')
+                randomSuffix = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+                subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
+                name = f"arpijain-hackathon-mover-{randomSuffix}"
+                location = 'eastus'
+                resource_group = 'arpijain-aws-storage-mover-test-01'
+            
+            if not bearer_token:
+                logging.warning("No bearer token found in context arguments")
+                return json.dumps({
+                    "error": "No bearer token found in context arguments",
+                    "status": "Failed"
+                }, indent=2)
+            else:
+                expected_audience = f"{application_cid}"
+                is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
+                
+                if is_valid:
+                    # Use static secret based client for token acquisition.
+                    # Not using the OBO flow here because admin consent is not provided for the app.
+                    # "error": "AADSTS65001: The user or administrator has not consented to use the application with ID 'ddad3aee-d646-4ccc-a3ae-acc9f2ff237f' named 'arpijainmcp05'. Send an interactive authorization request for this user and resource. Trace ID: cdc64abe-5053-4788-a2f9-2d93c1e7de00 Correlation ID: f999d0be-b438-4cbf-a902-e577e8cad657 Timestamp: 2025-09-19 08:25:30Z"
+                    result = cca_auth_client_using_static_secret.acquire_token_for_client(
+                        scopes=['https://management.azure.com/.default']
+                    )
+                else:
+                    return json.dumps({
+                        "error": "invalid_token",
+                        "error_description": validation_error,
+                        "status": "Failed"
+                    }, indent=2)
+                
+                if "access_token" in result:
+                    logging.info("Successfully acquired access token using OBO flow")
+                    access_token = result["access_token"]
+                    
+                    # Use the token to call Resource Management API
+                    try:
+                        # Create an authentication object for Resouce Management
+                        headers = {
+                            'Authorization': f'Bearer {access_token}',
+                            'Content-Type': 'application/json'
+                        }
+                        
+                        # Define the Storage Mover resource body
+                        storage_mover_body = {
+                            "location": location,
+                            "tags": {
+                                "created_by": "mcp_tool",
+                                "purpose": "hackathon"
+                            },
+                            "properties": {
+                                "description": f"Storage Mover created via MCP tool for hackathon"
+                            }
+                        }
+                        
+                        ################################################################################
+                        ##################### STEP 1: Create a Storage Mover ###########################
+                        ################################################################################
+
+                        # Create the Storage Mover using REST API
+                        # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/storage-movers/create-or-update
+                        storage_mover_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}?api-version=2023-10-01'
+                        
+                        logging.info(f"Creating Storage Mover at URL: {storage_mover_url}")
+                        storage_mover_response = requests.put(storage_mover_url, headers=headers, json=storage_mover_body)
+                        
+                        if storage_mover_response.status_code == 200:
+                            storage_mover_data = storage_mover_response.json()
+                            logging.info("Successfully retrieved resource group data")
+                        else:
+                            logging.error(f"Failed to get resource group data: {storage_mover_response.status_code}, {storage_mover_response.text}")
+                            return json.dumps({
+                                "error": f"Resource Management API error: {storage_mover_response.status_code}",
+                                "status": "Failed"
+                            }, indent=2)
+                        ######################### STEP 1 END ###############################
+
+                        ################################################################################
+                        ############### STEP 2: Create a Project for the Storage Mover #################
+                        ################################################################################
+
+                        project_guid = str(uuid.uuid4())[:8]
+                        project_name = f"{name}-project-{project_guid}"
+
+                        # Define the Project resource body
+                        project_body = {
+                            "properties": {
+                                "description": f"Project for StorageMover {name}"
+                            }
+                        }
+
+                        # Create the Project using REST API
+                        # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/projects/create-or-update
+                        project_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}/projects/{project_name}?api-version=2023-10-01'
+
+                        logging.info(f"Creating Storage Mover Project at URL: {project_url}")
+                        project_response = requests.put(project_url, headers=headers, json=project_body)
+
+                        if project_response.status_code in [200, 201]:
+                            project_data = project_response.json()
+                            logging.info("Successfully created Storage Mover Project")
+                        else:
+                            logging.error(f"Failed to create Storage Mover Project: {project_response.status_code}, {project_response.text}")
+                            return json.dumps({
+                                "error": f"Storage Mover Project API error: {project_response.status_code} - {project_response.text}",
+                                "status": "Failed"
+                            }, indent=2)
+                        ######################### STEP 2 END ###############################
+
+                    except Exception as ex:
+                        logging.error(f"Error calling Resource Management API: {str(ex)}")
+                        return json.dumps({
+                                "error": f"Resoure Management error: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+                else:
+                    logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
+                    return json.dumps({
+                        "error": "Unknown error acquiring token",
+                        "status": "Failed"
+                    }, indent=2)
+        except Exception as e:
+            error_msg = str(e)
+            logging.error(f"Exception when acquiring token: {error_msg}")
+            return json.dumps({
+                "error": f"Exception when acquiring token: {error_msg}",
+                "status": "Failed"
+            }, indent=2)
+
+        # Prepare the response
+        try:
+            response = {}
+            
+            response['storage_mover_data'] = storage_mover_data
+            response['project_data'] = project_data
+            response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
             return json.dumps(response, indent=2)
