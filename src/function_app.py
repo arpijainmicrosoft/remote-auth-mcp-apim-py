@@ -525,6 +525,8 @@ def create_aws_storage_migration(context) -> str:
     target_endpoint_data = None
     job_definition_data = None
     storage_account_contributor_role_assignment_data = None
+    blob_data_contributor_role_assignment_data = None
+    job_trigger_data = None
 
     try:
         logging.info(f"Context type: {type(context).__name__}")
@@ -955,6 +957,82 @@ def create_aws_storage_migration(context) -> str:
                         ############################ STEP 8 END #######################################
 
 
+                        ################################################################################
+                        ### STEP 9: Assign Blob Data Contributor role to Target Endpoint on Container ##
+                        ################################################################################
+
+                        # Generate unique role assignment ID
+                        blob_data_contributor_role_assignment_id = str(uuid.uuid4())
+
+                        # Blob Data Contributor role definition ID
+                        blob_data_contributor_role_id = "/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+
+                        # Prepare role assignment payload
+                        blob_data_contributor_role_assignment_payload = {
+                            "properties": {
+                                "principalId": target_endpoint_data['identity']['principalId'],
+                                "roleDefinitionId": blob_data_contributor_role_id,
+                                "principalType": "ServicePrincipal"
+                            }
+                        }
+
+                        # Prepare REST API request - using 2022-04-01 API version for role assignments
+                        blob_data_contributor_role_assignment_api_version = "2022-04-01"
+                        blob_data_contributor_role_assignment_url = f"https://management.azure.com{storage_account_id}/blobServices/default/containers/{container_name}/providers/Microsoft.Authorization/roleAssignments/{blob_data_contributor_role_assignment_id}?api-version={blob_data_contributor_role_assignment_api_version}"
+
+                        try:
+                            blob_data_contributor_role_assignment_response = requests.put(blob_data_contributor_role_assignment_url, headers=headers, json=blob_data_contributor_role_assignment_payload)
+
+                            if blob_data_contributor_role_assignment_response.status_code in [200, 201]:
+                                blob_data_contributor_role_assignment_data = blob_data_contributor_role_assignment_response.json()
+                                logging.info(f"[Blob-Data-Contributor-Role-Assignment] Successfully assigned Blob Data Contributor role to: {target_endpoint_data['name']}")
+                            else:
+                                logging.error(f"[Blob-Data-Contributor-Role-Assignment] Failed to assign Blob Data Contributor role: {blob_data_contributor_role_assignment_response.status_code}, {blob_data_contributor_role_assignment_response.text}")
+                                return json.dumps({
+                                    "error": f"Blob Data Contributor role assignment failed: {blob_data_contributor_role_assignment_response.status_code}, {blob_data_contributor_role_assignment_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Blob-Data-Contributor-Role-Assignment] Exception assigning role: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Blob Data Contributor role assignment exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+                                                                                                   
+                        ############################ STEP 9 END #######################################
+
+
+                        ################################################################################
+                        ############################# STEP 10: Trigger the Job #########################
+                        ################################################################################
+
+                        job_trigger_api_version = "2025-01-01-preview"
+                        job_trigger_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/projects/{project_name}/jobDefinitions/{job_definition_name}/startJob?api-version={job_trigger_api_version}"
+
+                        try:
+                            job_trigger_response = requests.post(job_trigger_url, headers=headers)
+
+                            if job_trigger_response.status_code in [200, 202]:
+                                 job_trigger_data = job_trigger_response.json()
+                                 logging.info(f"[Job-Trigger] Successfully triggered job for job definition: {job_definition_name}")
+                            else:
+                                logging.error(f"[Job-Trigger] Failed to trigger job: {job_trigger_response.status_code}, {job_trigger_response.text}")
+                                return json.dumps({
+                                    "error": f"Job trigger failed: {job_trigger_response.status_code}, {job_trigger_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Job-Trigger] Exception triggering job: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Job trigger exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 10 END ######################################
+
+
                     except Exception as ex:
                         logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
                         return json.dumps({
@@ -987,6 +1065,8 @@ def create_aws_storage_migration(context) -> str:
             response['target_endpoint_data'] = target_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['job_definition_data'] = job_definition_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['storage_account_contributor_role_assignment_data'] = storage_account_contributor_role_assignment_data
+            response['blob_data_contributor_role_assignment_data'] = blob_data_contributor_role_assignment_data
+            response['job_trigger_data'] = job_trigger_data
             response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
