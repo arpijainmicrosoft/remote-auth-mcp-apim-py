@@ -522,6 +522,7 @@ def create_aws_storage_migration(context) -> str:
     storage_account_data = None
     container_data = None
     source_endpoint_data = None
+    target_endpoint_data = None
 
     try:
         logging.info(f"Context type: {type(context).__name__}")
@@ -814,6 +815,53 @@ def create_aws_storage_migration(context) -> str:
                         ############################ STEP 5 END #######################################
 
 
+                        ################################################################################
+                        ######################## STEP 6: Create the target endpoint ####################
+                        ################################################################################
+
+                        target_endpoint_name = f"target-{str(uuid.uuid4())[:8]}"
+                                
+                        # Get storage account ID from the storage account result
+                        storage_account_id = storage_account_data.id
+
+                        # Prepare endpoint payload for Azure Storage Blob Container
+                        target_data_endpoint_payload = {
+                            "identity": {
+                                "type": "SystemAssigned"
+                            },
+                            "properties": {
+                                "blobContainerName": container_name,
+                                "endpointType": "AzureStorageBlobContainer",
+                                "storageAccountResourceId": storage_account_id
+                            }
+                        }
+                        
+                        # Prepare REST API request
+                        target_endpoint_api_version = "2025-01-01-preview"
+                        target_endpoint_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/endpoints/{target_endpoint_name}?api-version={target_endpoint_api_version}"
+
+                        try:
+                            target_endpoint_creation_response = requests.put(target_endpoint_creation_url, headers=headers, json=target_data_endpoint_payload)
+
+                            if target_endpoint_creation_response.status_code in [200, 201]:
+                                 target_endpoint_data = target_endpoint_creation_response.json()
+                                 logging.info(f"[Target-Endpoint-Creation] Successfully created target endpoint: {target_endpoint_name}")
+                            else:
+                                logging.error(f"[Target-Endpoint-Creation] Failed to create target endpoint: {target_endpoint_creation_response.status_code}, {target_endpoint_creation_response.text}")
+                                return json.dumps({
+                                    "error": f"Target endpoint creation failed: {target_endpoint_creation_response.status_code}, {target_endpoint_creation_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Target-Endpoint-Creation] Exception creating target endpoint: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Target endpoint creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 6 END #######################################
+
 
                     except Exception as ex:
                         logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
@@ -844,6 +892,7 @@ def create_aws_storage_migration(context) -> str:
             response['storage_account_data'] = storage_account_data.as_dict()
             response['container_data'] = container_data # as_dict() not applicable, already a dict
             response['source_endpoint_data'] = source_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
+            response['target_endpoint_data'] = target_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
