@@ -5,10 +5,24 @@ import requests
 import msal
 import traceback
 import jwt
+import uuid
+from datetime import datetime
 from jwt.exceptions import PyJWTError
 
 import azure.functions as func
 from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.storage import StorageManagementClient
+from azure.mgmt.storagemover import StorageMoverMgmtClient
+from azure.storage.blob import BlobServiceClient
+from azure.identity import ClientSecretCredential
+from azure.core.credentials import AccessToken
+
+# Import helper functions
+from helpers import (
+    extract_multicloud_connector_id,
+    construct_aws_resource_group_name,
+    create_storage_mover_endpoint_payload
+)
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -22,6 +36,16 @@ application_secret = os.environ.get('APPLICATION_SECRET', 'Not set')
 managed_identity = msal.UserAssignedManagedIdentity(client_id=application_uami)
 
 mi_auth_client = msal.ManagedIdentityClient(managed_identity, http_client=requests.Session())
+
+# Custom credential class to use the bearer token from context
+class BearerTokenCredential:
+    def __init__(self, access_token, expires_on=None):
+        self.access_token = access_token
+        # Set expiry to 1 hour from now if not provided
+        self.expires_on = expires_on or (datetime.now().timestamp() + 3600)
+    
+    def get_token(self, *scopes, **kwargs):
+        return AccessToken(self.access_token, int(self.expires_on))
 
 # Define the token function before using it
 def get_managed_identity_token(audience):
@@ -453,6 +477,597 @@ def create_storage_mover(context) -> str:
                 # If we failed to get resource group data, return error information
                 response['success'] = False
                 response['error'] = token_error or "Failed to retrieve resource group data"
+            
+            logging.info(f"Returning response: {json.dumps(response)[:500]}...")
+            return json.dumps(response, indent=2)
+        except Exception as format_error:
+            logging.error(f"Error formatting response: {str(format_error)}")
+            return json.dumps({
+                "success": False,
+                "error": f"Error formatting response: {str(format_error)}"
+            }, indent=2)
+    except Exception as e:
+        stack_trace = traceback.format_exc()
+        return json.dumps({
+            "error": f"An error occurred: {str(e)}\n{stack_trace}",
+            "stack_trace": stack_trace,
+            "raw_context": str(context)
+        }, indent=2)
+
+@app.generic_trigger(
+    arg_name="context",
+    type="mcpToolTrigger",
+    toolName="create_aws_storage_migration",
+    description="Create a StorageMover resource to move data from AWS S3 to Azure Blob Storage.",
+    toolProperties="[]",
+)
+def create_aws_storage_migration(context) -> str:
+    """
+    Create a StorageMover resource with the specified parameters using Azure SDK.
+    Also creates a project for the Storage Mover with a unique GUID-based name.
+    Creates a storage account with a container for use with the Storage Mover.
+    Optionally creates an Azure Arc multicloud connector for AWS integration.
+    Optionally creates an AWS S3 source endpoint for the Storage Mover.
+    
+    Args:
+        context: The trigger context as a JSON string containing the request information.
+                Expected to contain 'subscription_id' in the arguments.
+        
+    Returns:
+        JSON string with resource creation details, error information, or parameter guidance.
+    """
+    
+    storage_mover_data = None
+    project_data = None
+    storage_account_data = None
+    container_data = None
+    source_endpoint_data = None
+    target_endpoint_data = None
+    job_definition_data = None
+    storage_account_contributor_role_assignment_data = None
+    blob_data_contributor_role_assignment_data = None
+    job_trigger_data = None
+
+    try:
+        logging.info(f"Context type: {type(context).__name__}")
+        try:
+            context_obj = json.loads(context)
+            arguments = context_obj.get('arguments', {})
+            bearer_token = None
+            datetimeSuffix = None
+            subscription_id = None
+            name = None
+            location = None
+            resource_group = None
+            connector_id = None
+            aws_account_id = None
+            bucket_name = None
+            logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
+            
+            if isinstance(arguments, dict):
+                bearer_token = arguments.get('bearerToken')
+                datetimeSuffix = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+                subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
+                name = f"arpijain-hackathon-mover-{datetimeSuffix}"
+                location = 'eastus'
+                resource_group = 'arpijain-aws-storage-mover-test-01'
+                connector_id = "/subscriptions/32758ed5-6e7b-4f7a-90ac-e60d869ce968/resourceGroups/sunidhi/providers/Microsoft.HybridConnectivity/publicCloudConnectors/connector1/providers/Microsoft.HybridConnectivity/solutionConfigurations/storageMover"
+                aws_account_id = '332061897005'
+                bucket_name = 'sunidhibucket1'
+
+            if not bearer_token:
+                logging.warning("No bearer token found in context arguments")
+                return json.dumps({
+                    "error": "No bearer token found in context arguments",
+                    "status": "Failed"
+                }, indent=2)
+            else:
+                expected_audience = f"{application_cid}"
+                is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
+                
+                if is_valid:
+                    # Use static secret based client for token acquisition.
+                    # Not using the OBO flow here because admin consent is not provided for the app.
+                    # "error": "AADSTS65001: The user or administrator has not consented to use the application with ID 'ddad3aee-d646-4ccc-a3ae-acc9f2ff237f' named 'arpijainmcp05'. Send an interactive authorization request for this user and resource. Trace ID: cdc64abe-5053-4788-a2f9-2d93c1e7de00 Correlation ID: f999d0be-b438-4cbf-a902-e577e8cad657 Timestamp: 2025-09-19 08:25:30Z"
+                    result = cca_auth_client_using_static_secret.acquire_token_for_client(
+                        scopes=['https://management.azure.com/.default']
+                    )
+                else:
+                    return json.dumps({
+                        "error": "invalid_token",
+                        "error_description": validation_error,
+                        "status": "Failed"
+                    }, indent=2)
+                
+                if "access_token" in result:
+                    logging.info("Successfully acquired access token using OBO flow")
+                    access_token = result["access_token"]
+
+                    # Create an authentication object
+                    headers = {
+                        'Authorization': f'Bearer {access_token}',
+                        'Content-Type': 'application/json'
+                    }
+
+                    # Create credential object for SDK clients
+                    credential = BearerTokenCredential(access_token)
+                    
+                    # Use the token to call Resource Management API
+                    try:
+
+                        ################################################################################
+                        ##################### STEP 1: Create a Storage Mover ###########################
+                        ################################################################################
+
+                        storage_mover_name = name
+
+                        # Initialize StorageMover client
+                        storage_mover_client = StorageMoverMgmtClient(
+                            credential=credential,
+                            subscription_id=subscription_id
+                        )
+                        
+                        # Define the Storage Mover properties                        
+                        from azure.mgmt.storagemover.models import StorageMover  # Import locally to avoid module-level issues
+                        storage_mover_properties = StorageMover(
+                            location=location,
+                            tags={},
+                            description=f"StorageMover resource created via MCP server"
+                        )
+                        
+                        try:
+                            logging.info(f"[Storage-Mover-Create] Creating Storage Mover: {storage_mover_name}")
+                            storage_mover_data = storage_mover_client.storage_movers.create_or_update(
+                                resource_group_name=resource_group,
+                                storage_mover_name=storage_mover_name,
+                                storage_mover=storage_mover_properties
+                            )
+
+                            logging.info("[Storage-Mover-Create] Successfully created Storage Mover")
+                        except Exception as ex:
+                            logging.error(f"[Storage-Mover-Create] Exception creating Storage Mover: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Storage Mover creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+                        
+                        ######################### STEP 1 END ###############################
+
+
+
+                        ################################################################################
+                        ############### STEP 2: Create a Project for the Storage Mover #################
+                        ################################################################################
+
+                        project_name = f"project-{datetimeSuffix}"
+
+                        from azure.mgmt.storagemover.models import Project
+        
+                        project_params = Project(
+                            description=f"Project for StorageMover {storage_mover_name}"
+                        )
+                        
+                        # Create the project
+                        try:
+                            project_data = storage_mover_client.projects.create_or_update(
+                                resource_group_name=resource_group,
+                                storage_mover_name=storage_mover_name,
+                                project_name=project_name,
+                                project=project_params
+                            )
+                            logging.info("[Storage-Mover-Project-Create] Successfully created Storage Mover Project")
+                        except Exception as ex:
+                            logging.error(f"[Storage-Mover-Project-Create] Exception creating Storage Mover Project: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Storage Mover Project creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+                        
+                        ######################### STEP 2 END ###############################
+
+
+
+                        ################################################################################
+                        ####################### STEP 3: Create a Storage Account #######################
+                        ################################################################################
+
+                        # Generate storage account name with timestamp suffix
+                        storage_account_name = f"sa{datetimeSuffix.replace('-', '')}"
+                        logging.info(f"[Storage-Account-Create] Generated storage account name: {storage_account_name}")
+
+                        storage_client = StorageManagementClient(credential, subscription_id)
+
+                        from azure.mgmt.storage.models import StorageAccountCreateParameters, Sku, Kind, AccessTier
+                        # Create storage account parameters
+                        storage_params = StorageAccountCreateParameters(
+                            sku=Sku(name="Standard_LRS"),
+                            kind=Kind.STORAGE_V2,
+                            location=location,
+                            tags={"purpose": "StorageMover"},
+                            enable_https_traffic_only=True
+                        )
+                        
+                        storage_account_create_operation = None
+                        # Create storage account
+                        try:
+                            storage_account_create_operation = storage_client.storage_accounts.begin_create(
+                                resource_group_name=resource_group,
+                                account_name=storage_account_name,
+                                parameters=storage_params
+                            )
+                            logging.info(f"[Storage-Account-Create] Storage account creation initiated: {storage_account_name}")
+                        except Exception as ex:
+                            logging.error(f"[Storage-Account-Create] Exception initiating storage account creation: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Storage account creation initiation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+                        
+                        # Wait for completion (with timeout)
+                        import time
+                        start_time = time.time()
+                        timeout_seconds = 120
+                        
+                        while not storage_account_create_operation.done() and (time.time() - start_time < timeout_seconds):
+                            time.sleep(5)
+                        
+                        if not storage_account_create_operation.done():
+                            return json.dumps({
+                                "error": f"Storage account creation timed out after {timeout_seconds} seconds",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        logging.info(f"[Storage-Account-Create] Storage account creation completed: {storage_account_name}")
+                        storage_account_data = storage_account_create_operation.result()
+
+                        # Get storage account ID from the storage account result
+                        storage_account_id = storage_account_data.id
+
+                        ############################ STEP 3 END #######################################
+
+
+
+                        ################################################################################
+                        ################## STEP 4: Create Container in Storage Account #################
+                        ################################################################################
+
+                        # Create blob container
+                        container_name = "container1"
+
+                        # Get storage account keys
+                        keys = storage_client.storage_accounts.list_keys(
+                            resource_group_name=resource_group,
+                            account_name=storage_account_name
+                        )
+
+                        if keys.keys:
+                            account_key = keys.keys[0].value
+                            
+                            # Create blob service client using connection string
+                            from azure.storage.blob import BlobServiceClient
+                            
+                            connection_string = f"DefaultEndpointsProtocol=https;AccountName={storage_account_name};AccountKey={account_key};EndpointSuffix=core.windows.net"
+                            blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+                            
+                            # Create container
+                            container_response = blob_service_client.create_container(container_name)
+                            container_data = {
+                                'container_name': container_name,
+                                'storage_account_name': storage_account_name,
+                                'url': container_response.url if hasattr(container_response, 'url') else None,
+                                'account_name': container_response.account_name if hasattr(container_response, 'account_name') else None
+                            }
+                            logging.info(f"[Blob-Container-Creation] Successfully created blob container: {container_name}")
+                        else:
+                            logging.warning("[Blob-Container-Creation] No storage account keys found")
+                            return json.dumps({
+                                "error": f"No storage account keys available for storage account {storage_account_name}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 4 END #######################################
+
+
+                        ################################################################################
+                        ######################## STEP 5: Create the source endpoint ####################
+                        ################################################################################
+
+                        logging.info(f"[Source-Endpoint-Creation] Creating AWS S3 source endpoint for StorageMover: {name}")
+                        
+                        # Auto-generate endpoint name with GUID
+                        import uuid
+                        endpoint_guid = str(uuid.uuid4())[:8]  # Use first 8 chars of GUID
+                        source_endpoint_name = f"source-{endpoint_guid}"
+
+                        # Extract base connector ID
+                        multicloud_connector_id = extract_multicloud_connector_id(connector_id)
+                        
+                        # Construct AWS resource group name
+                        aws_resource_group = construct_aws_resource_group_name(str(aws_account_id))
+
+                        # Create endpoint payload
+                        source_data_endpoint_payload = create_storage_mover_endpoint_payload(
+                            endpoint_type="AzureMultiCloudConnector",
+                            multicloud_connector_id=multicloud_connector_id,
+                            subscription_id=subscription_id,
+                            aws_resource_group=aws_resource_group,
+                            bucket_name=bucket_name,
+                            description=f"AWS S3 source endpoint for bucket {bucket_name}"
+                        )
+
+                        # Create the source endpoint using REST api call
+                        try:
+                            storage_mover_api_version = "2025-01-01-preview"
+                            source_endpoint_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/endpoints/{source_endpoint_name}?api-version={storage_mover_api_version}"
+
+                            source_endpoint_creation_response = requests.put(source_endpoint_creation_url, headers=headers, json=source_data_endpoint_payload)
+
+                            if source_endpoint_creation_response.status_code in [200, 201]:
+                                 source_endpoint_data = source_endpoint_creation_response.json()
+                                 logging.info(f"[Source-Endpoint-Creation] Successfully created source endpoint: {source_endpoint_name}")
+                            else:
+                                logging.error(f"[Source-Endpoint-Creation] Failed to create source endpoint: {source_endpoint_creation_response.status_code}, {source_endpoint_creation_response.text}")
+                                return json.dumps({
+                                    "error": f"Source endpoint creation failed: {source_endpoint_creation_response.status_code}, {source_endpoint_creation_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Source-Endpoint-Creation] Exception creating source endpoint: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Source endpoint creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 5 END #######################################
+
+
+                        ################################################################################
+                        ######################## STEP 6: Create the target endpoint ####################
+                        ################################################################################
+
+                        target_endpoint_name = f"target-{str(uuid.uuid4())[:8]}"
+
+                        # Prepare endpoint payload for Azure Storage Blob Container
+                        target_data_endpoint_payload = {
+                            "identity": {
+                                "type": "SystemAssigned"
+                            },
+                            "properties": {
+                                "blobContainerName": container_name,
+                                "endpointType": "AzureStorageBlobContainer",
+                                "storageAccountResourceId": storage_account_id
+                            }
+                        }
+                        
+                        # Prepare REST API request
+                        target_endpoint_api_version = "2025-01-01-preview"
+                        target_endpoint_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/endpoints/{target_endpoint_name}?api-version={target_endpoint_api_version}"
+
+                        try:
+                            target_endpoint_creation_response = requests.put(target_endpoint_creation_url, headers=headers, json=target_data_endpoint_payload)
+
+                            if target_endpoint_creation_response.status_code in [200, 201]:
+                                 target_endpoint_data = target_endpoint_creation_response.json()
+                                 logging.info(f"[Target-Endpoint-Creation] Successfully created target endpoint: {target_endpoint_name}")
+                            else:
+                                logging.error(f"[Target-Endpoint-Creation] Failed to create target endpoint: {target_endpoint_creation_response.status_code}, {target_endpoint_creation_response.text}")
+                                return json.dumps({
+                                    "error": f"Target endpoint creation failed: {target_endpoint_creation_response.status_code}, {target_endpoint_creation_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Target-Endpoint-Creation] Exception creating target endpoint: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Target endpoint creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 6 END #######################################
+
+
+                        ################################################################################
+                        ########################### STEP 7: Create Job Definition ######################
+                        ################################################################################
+
+                        job_definition_name = f"{name}-{str(uuid.uuid4())[:8]}"
+                        project_name = project_data.name
+                        
+                        job_def_creation_payload = {
+                            "properties": {
+                                "copyMode": "Additive",
+                                "jobType": "CloudToCloud",
+                                "sourceName": source_endpoint_name,
+                                "sourceSubpath": "/",
+                                "targetName": target_endpoint_name,
+                                "targetSubpath": "/"
+                            }
+                        }
+
+                        job_def_creation_api_version = "2025-01-01-preview"
+                        job_def_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/projects/{project_name}/jobDefinitions/{job_definition_name}?api-version={job_def_creation_api_version}"
+
+                        try:
+                            job_def_creation_response = requests.put(job_def_creation_url, headers=headers, json=job_def_creation_payload)
+
+                            if job_def_creation_response.status_code in [200, 201]:
+                                 job_definition_data = job_def_creation_response.json()
+                                 logging.info(f"[Job-Definition-Creation] Successfully created job definition: {job_definition_name}")
+                            else:
+                                logging.error(f"[Job-Definition-Creation] Failed to create job definition: {job_def_creation_response.status_code}, {job_def_creation_response.text}")
+                                return json.dumps({
+                                    "error": f"Job definition creation failed: {job_def_creation_response.status_code}, {job_def_creation_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Job-Definition-Creation] Exception creating job definition: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Job definition creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 7 END #######################################
+
+
+                        ################################################################################
+                        # STEP 8: Assign Storage Account Contributor role to Target Endpoint on Storage Account #
+                        ################################################################################
+
+                        # Generate unique role assignment ID
+                        storage_account_contributor_role_assignment_id = str(uuid.uuid4())
+                        
+                        # Storage Account Contributor role definition ID
+                        storage_account_contributor_role_id = "/providers/Microsoft.Authorization/roleDefinitions/17d1049b-9a84-46fb-8f53-869881c3d3ab"
+                        
+                        # Prepare role assignment payload
+                        storage_account_contributor_role_assignment_payload = {
+                            "properties": {
+                                "principalId": target_endpoint_data['identity']['principalId'],
+                                "roleDefinitionId": storage_account_contributor_role_id,
+                                "principalType": "ServicePrincipal"
+                            }
+                        }
+                        
+                        # Prepare REST API request - using 2022-04-01 API version for role assignments
+                        storage_account_contributor_role_assignment_api_version = "2022-04-01"
+                        storage_account_contributor_role_assignment_url = f"https://management.azure.com{storage_account_id}/providers/Microsoft.Authorization/roleAssignments/{storage_account_contributor_role_assignment_id}?api-version={storage_account_contributor_role_assignment_api_version}"
+
+                        try:
+                            storage_account_contributor_role_assignment_response = requests.put(storage_account_contributor_role_assignment_url, headers=headers, json=storage_account_contributor_role_assignment_payload)
+
+                            if storage_account_contributor_role_assignment_response.status_code in [200, 201]:
+                                 storage_account_contributor_role_assignment_data = storage_account_contributor_role_assignment_response.json()
+                                 logging.info(f"[Storage-Account-Contributor-Role-Assignment] Successfully assigned Storage Account Contributor role to: {target_endpoint_data['name']}")
+                            else:
+                                logging.error(f"[Storage-Account-Contributor-Role-Assignment] Failed to assign Storage Account Contributor role: {storage_account_contributor_role_assignment_response.status_code}, {storage_account_contributor_role_assignment_response.text}")
+                                return json.dumps({
+                                    "error": f"Storage Account Contributor role assignment failed: {storage_account_contributor_role_assignment_response.status_code}, {storage_account_contributor_role_assignment_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Storage-Account-Contributor-Role-Assignment] Exception assigning role: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Storage Account Contributor role assignment exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 8 END #######################################
+
+
+                        ################################################################################
+                        ### STEP 9: Assign Blob Data Contributor role to Target Endpoint on Container ##
+                        ################################################################################
+
+                        # Generate unique role assignment ID
+                        blob_data_contributor_role_assignment_id = str(uuid.uuid4())
+
+                        # Blob Data Contributor role definition ID
+                        blob_data_contributor_role_id = "/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+
+                        # Prepare role assignment payload
+                        blob_data_contributor_role_assignment_payload = {
+                            "properties": {
+                                "principalId": target_endpoint_data['identity']['principalId'],
+                                "roleDefinitionId": blob_data_contributor_role_id,
+                                "principalType": "ServicePrincipal"
+                            }
+                        }
+
+                        # Prepare REST API request - using 2022-04-01 API version for role assignments
+                        blob_data_contributor_role_assignment_api_version = "2022-04-01"
+                        blob_data_contributor_role_assignment_url = f"https://management.azure.com{storage_account_id}/blobServices/default/containers/{container_name}/providers/Microsoft.Authorization/roleAssignments/{blob_data_contributor_role_assignment_id}?api-version={blob_data_contributor_role_assignment_api_version}"
+
+                        try:
+                            blob_data_contributor_role_assignment_response = requests.put(blob_data_contributor_role_assignment_url, headers=headers, json=blob_data_contributor_role_assignment_payload)
+
+                            if blob_data_contributor_role_assignment_response.status_code in [200, 201]:
+                                blob_data_contributor_role_assignment_data = blob_data_contributor_role_assignment_response.json()
+                                logging.info(f"[Blob-Data-Contributor-Role-Assignment] Successfully assigned Blob Data Contributor role to: {target_endpoint_data['name']}")
+                            else:
+                                logging.error(f"[Blob-Data-Contributor-Role-Assignment] Failed to assign Blob Data Contributor role: {blob_data_contributor_role_assignment_response.status_code}, {blob_data_contributor_role_assignment_response.text}")
+                                return json.dumps({
+                                    "error": f"Blob Data Contributor role assignment failed: {blob_data_contributor_role_assignment_response.status_code}, {blob_data_contributor_role_assignment_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Blob-Data-Contributor-Role-Assignment] Exception assigning role: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Blob Data Contributor role assignment exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+                                                                                                   
+                        ############################ STEP 9 END #######################################
+
+
+                        ################################################################################
+                        ############################# STEP 10: Trigger the Job #########################
+                        ################################################################################
+
+                        job_trigger_api_version = "2025-01-01-preview"
+                        job_trigger_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/projects/{project_name}/jobDefinitions/{job_definition_name}/startJob?api-version={job_trigger_api_version}"
+
+                        try:
+                            job_trigger_response = requests.post(job_trigger_url, headers=headers)
+
+                            if job_trigger_response.status_code in [200, 202]:
+                                 job_trigger_data = job_trigger_response.json()
+                                 logging.info(f"[Job-Trigger] Successfully triggered job for job definition: {job_definition_name}")
+                            else:
+                                logging.error(f"[Job-Trigger] Failed to trigger job: {job_trigger_response.status_code}, {job_trigger_response.text}")
+                                return json.dumps({
+                                    "error": f"Job trigger failed: {job_trigger_response.status_code}, {job_trigger_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Job-Trigger] Exception triggering job: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Job trigger exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 10 END ######################################
+
+
+                    except Exception as ex:
+                        logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
+                        return json.dumps({
+                                "error": f"Generic error in aws migration tool steps: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+                else:
+                    logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
+                    return json.dumps({
+                        "error": "Unknown error acquiring token",
+                        "status": "Failed"
+                    }, indent=2)
+        except Exception as e:
+            error_msg = str(e)
+            logging.error(f"Exception when acquiring token: {error_msg}")
+            return json.dumps({
+                "error": f"Exception when acquiring token: {error_msg}",
+                "status": "Failed"
+            }, indent=2)
+
+        # Prepare the response
+        try:
+            response = {}
+            
+            response['storage_mover_data'] = storage_mover_data.as_dict()
+            response['project_data'] = project_data.as_dict()
+            response['storage_account_data'] = storage_account_data.as_dict()
+            response['container_data'] = container_data # as_dict() not applicable, already a dict
+            response['source_endpoint_data'] = source_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
+            response['target_endpoint_data'] = target_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
+            response['job_definition_data'] = job_definition_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
+            response['storage_account_contributor_role_assignment_data'] = storage_account_contributor_role_assignment_data
+            response['blob_data_contributor_role_assignment_data'] = blob_data_contributor_role_assignment_data
+            response['job_trigger_data'] = job_trigger_data
+            response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
             return json.dumps(response, indent=2)

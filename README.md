@@ -37,12 +37,13 @@ Add secret as an env variable in the function app
 
 ![Add Secrets as Env Var](./media/function-app-add-secret-as-env-variable.jpeg)
 
-Provide app Contributor role in the Subscription
+Provide app Contributor and Role Based Access Control Administrator role in the Subscription
 1. Go to subscription and open the IAM blade
 2. Add new role Contributor and search your app using "name"
-3. Select the service principal for your app and assign the role
+3. Add new role "Role Based Access Control Administrator" and search your app using "name"
+4. Select the service principal for your app and assign the role
 
-![Contributor role for the app](./media/contributor-permission-for-entra-app.jpeg)
+![Contributor and Role Based Access Control Administrator role for the app](./media/contributor-permission-for-entra-app.jpeg)
 
 ## ⚠️ Important: Experimental Implementation
 
