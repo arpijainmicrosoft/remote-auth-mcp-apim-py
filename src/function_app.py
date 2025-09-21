@@ -524,6 +524,7 @@ def create_aws_storage_migration(context) -> str:
     source_endpoint_data = None
     target_endpoint_data = None
     job_definition_data = None
+    storage_account_contributor_role_assignment_data = None
 
     try:
         logging.info(f"Context type: {type(context).__name__}")
@@ -717,6 +718,9 @@ def create_aws_storage_migration(context) -> str:
                         logging.info(f"[Storage-Account-Create] Storage account creation completed: {storage_account_name}")
                         storage_account_data = storage_account_create_operation.result()
 
+                        # Get storage account ID from the storage account result
+                        storage_account_id = storage_account_data.id
+
                         ############################ STEP 3 END #######################################
 
 
@@ -821,9 +825,6 @@ def create_aws_storage_migration(context) -> str:
                         ################################################################################
 
                         target_endpoint_name = f"target-{str(uuid.uuid4())[:8]}"
-                                
-                        # Get storage account ID from the storage account result
-                        storage_account_id = storage_account_data.id
 
                         # Prepare endpoint payload for Azure Storage Blob Container
                         target_data_endpoint_payload = {
@@ -908,6 +909,52 @@ def create_aws_storage_migration(context) -> str:
                         ############################ STEP 7 END #######################################
 
 
+                        ################################################################################
+                        # STEP 8: Assign Storage Account Contributor role to Target Endpoint on Storage Account #
+                        ################################################################################
+
+                        # Generate unique role assignment ID
+                        storage_account_contributor_role_assignment_id = str(uuid.uuid4())
+                        
+                        # Storage Account Contributor role definition ID
+                        storage_account_contributor_role_id = "/providers/Microsoft.Authorization/roleDefinitions/17d1049b-9a84-46fb-8f53-869881c3d3ab"
+                        
+                        # Prepare role assignment payload
+                        storage_account_contributor_role_assignment_payload = {
+                            "properties": {
+                                "principalId": target_endpoint_data['identity']['principalId'],
+                                "roleDefinitionId": storage_account_contributor_role_id,
+                                "principalType": "ServicePrincipal"
+                            }
+                        }
+                        
+                        # Prepare REST API request - using 2022-04-01 API version for role assignments
+                        storage_account_contributor_role_assignment_api_version = "2022-04-01"
+                        storage_account_contributor_role_assignment_url = f"https://management.azure.com{storage_account_id}/providers/Microsoft.Authorization/roleAssignments/{storage_account_contributor_role_assignment_id}?api-version={storage_account_contributor_role_assignment_api_version}"
+
+                        try:
+                            storage_account_contributor_role_assignment_response = requests.put(storage_account_contributor_role_assignment_url, headers=headers, json=storage_account_contributor_role_assignment_payload)
+
+                            if storage_account_contributor_role_assignment_response.status_code in [200, 201]:
+                                 storage_account_contributor_role_assignment_data = storage_account_contributor_role_assignment_response.json()
+                                 logging.info(f"[Storage-Account-Contributor-Role-Assignment] Successfully assigned Storage Account Contributor role to: {target_endpoint_data['name']}")
+                            else:
+                                logging.error(f"[Storage-Account-Contributor-Role-Assignment] Failed to assign Storage Account Contributor role: {storage_account_contributor_role_assignment_response.status_code}, {storage_account_contributor_role_assignment_response.text}")
+                                return json.dumps({
+                                    "error": f"Storage Account Contributor role assignment failed: {storage_account_contributor_role_assignment_response.status_code}, {storage_account_contributor_role_assignment_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Storage-Account-Contributor-Role-Assignment] Exception assigning role: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Storage Account Contributor role assignment exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 8 END #######################################
+
+
                     except Exception as ex:
                         logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
                         return json.dumps({
@@ -939,6 +986,7 @@ def create_aws_storage_migration(context) -> str:
             response['source_endpoint_data'] = source_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['target_endpoint_data'] = target_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['job_definition_data'] = job_definition_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
+            response['storage_account_contributor_role_assignment_data'] = storage_account_contributor_role_assignment_data
             response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
