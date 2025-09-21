@@ -17,6 +17,13 @@ from azure.storage.blob import BlobServiceClient
 from azure.identity import ClientSecretCredential
 from azure.core.credentials import AccessToken
 
+# Import helper functions
+from helpers import (
+    extract_multicloud_connector_id,
+    construct_aws_resource_group_name,
+    create_storage_mover_endpoint_payload
+)
+
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 # This variable is set in Bicep and is automatically provisioned.
@@ -514,6 +521,7 @@ def create_aws_storage_migration(context) -> str:
     project_data = None
     storage_account_data = None
     container_data = None
+    source_endpoint_data = None
 
     try:
         logging.info(f"Context type: {type(context).__name__}")
@@ -526,6 +534,9 @@ def create_aws_storage_migration(context) -> str:
             name = None
             location = None
             resource_group = None
+            connector_id = None
+            aws_account_id = None
+            bucket_name = None
             logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
             
             if isinstance(arguments, dict):
@@ -535,7 +546,10 @@ def create_aws_storage_migration(context) -> str:
                 name = f"arpijain-hackathon-mover-{datetimeSuffix}"
                 location = 'eastus'
                 resource_group = 'arpijain-aws-storage-mover-test-01'
-            
+                connector_id = "/subscriptions/32758ed5-6e7b-4f7a-90ac-e60d869ce968/resourceGroups/sunidhi/providers/Microsoft.HybridConnectivity/publicCloudConnectors/connector1/providers/Microsoft.HybridConnectivity/solutionConfigurations/storageMover"
+                aws_account_id = '332061897005'
+                bucket_name = 'sunidhibucket1'
+
             if not bearer_token:
                 logging.warning("No bearer token found in context arguments")
                 return json.dumps({
@@ -580,6 +594,8 @@ def create_aws_storage_migration(context) -> str:
                         ##################### STEP 1: Create a Storage Mover ###########################
                         ################################################################################
 
+                        storage_mover_name = name
+
                         # Initialize StorageMover client
                         storage_mover_client = StorageMoverMgmtClient(
                             credential=credential,
@@ -595,10 +611,10 @@ def create_aws_storage_migration(context) -> str:
                         )
                         
                         try:
-                            logging.info(f"[Storage-Mover-Create] Creating Storage Mover: {name}")
+                            logging.info(f"[Storage-Mover-Create] Creating Storage Mover: {storage_mover_name}")
                             storage_mover_data = storage_mover_client.storage_movers.create_or_update(
                                 resource_group_name=resource_group,
-                                storage_mover_name=name,
+                                storage_mover_name=storage_mover_name,
                                 storage_mover=storage_mover_properties
                             )
 
@@ -612,6 +628,8 @@ def create_aws_storage_migration(context) -> str:
                         
                         ######################### STEP 1 END ###############################
 
+
+
                         ################################################################################
                         ############### STEP 2: Create a Project for the Storage Mover #################
                         ################################################################################
@@ -621,14 +639,14 @@ def create_aws_storage_migration(context) -> str:
                         from azure.mgmt.storagemover.models import Project
         
                         project_params = Project(
-                            description=f"Project for StorageMover {name}"
+                            description=f"Project for StorageMover {storage_mover_name}"
                         )
                         
                         # Create the project
                         try:
                             project_data = storage_mover_client.projects.create_or_update(
                                 resource_group_name=resource_group,
-                                storage_mover_name=name,
+                                storage_mover_name=storage_mover_name,
                                 project_name=project_name,
                                 project=project_params
                             )
@@ -641,6 +659,7 @@ def create_aws_storage_migration(context) -> str:
                             }, indent=2)
                         
                         ######################### STEP 2 END ###############################
+
 
 
                         ################################################################################
@@ -698,6 +717,8 @@ def create_aws_storage_migration(context) -> str:
 
                         ############################ STEP 3 END #######################################
 
+
+
                         ################################################################################
                         ################## STEP 4: Create Container in Storage Account #################
                         ################################################################################
@@ -738,6 +759,62 @@ def create_aws_storage_migration(context) -> str:
 
                         ############################ STEP 4 END #######################################
 
+
+                        ################################################################################
+                        ######################## STEP 5: Create the source endpoint ####################
+                        ################################################################################
+
+                        logging.info(f"[Source-Endpoint-Creation] Creating AWS S3 source endpoint for StorageMover: {name}")
+                        
+                        # Auto-generate endpoint name with GUID
+                        import uuid
+                        endpoint_guid = str(uuid.uuid4())[:8]  # Use first 8 chars of GUID
+                        src_endpt_creation_final_endpoint_name = f"source-{endpoint_guid}"
+
+                        # Extract base connector ID
+                        multicloud_connector_id = extract_multicloud_connector_id(connector_id)
+                        
+                        # Construct AWS resource group name
+                        aws_resource_group = construct_aws_resource_group_name(str(aws_account_id))
+
+                        # Create endpoint payload
+                        source_data_endpoint_payload = create_storage_mover_endpoint_payload(
+                            endpoint_type="AzureMultiCloudConnector",
+                            multicloud_connector_id=multicloud_connector_id,
+                            subscription_id=subscription_id,
+                            aws_resource_group=aws_resource_group,
+                            bucket_name=bucket_name,
+                            description=f"AWS S3 source endpoint for bucket {bucket_name}"
+                        )
+
+                        # Create the source endpoint using REST api call
+                        try:
+                            storage_mover_api_version = "2025-01-01-preview"
+                            source_endpoint_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/endpoints/{src_endpt_creation_final_endpoint_name}?api-version={storage_mover_api_version}"
+
+                            source_endpoint_creation_response = requests.put(source_endpoint_creation_url, headers=headers, json=source_data_endpoint_payload)
+
+                            if source_endpoint_creation_response.status_code in [200, 201]:
+                                 source_endpoint_data = source_endpoint_creation_response.json()
+                                 logging.info(f"[Source-Endpoint-Creation] Successfully created source endpoint: {src_endpt_creation_final_endpoint_name}")
+                            else:
+                                logging.error(f"[Source-Endpoint-Creation] Failed to create source endpoint: {source_endpoint_creation_response.status_code}, {source_endpoint_creation_response.text}")
+                                return json.dumps({
+                                    "error": f"Source endpoint creation failed: {source_endpoint_creation_response.status_code}, {source_endpoint_creation_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Source-Endpoint-Creation] Exception creating source endpoint: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Source endpoint creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 5 END #######################################
+
+
+
                     except Exception as ex:
                         logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
                         return json.dumps({
@@ -766,6 +843,7 @@ def create_aws_storage_migration(context) -> str:
             response['project_data'] = project_data.as_dict()
             response['storage_account_data'] = storage_account_data.as_dict()
             response['container_data'] = container_data # as_dict() not applicable, already a dict
+            response['source_endpoint_data'] = source_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
