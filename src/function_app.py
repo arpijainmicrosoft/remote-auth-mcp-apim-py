@@ -523,6 +523,7 @@ def create_aws_storage_migration(context) -> str:
     container_data = None
     source_endpoint_data = None
     target_endpoint_data = None
+    job_definition_data = None
 
     try:
         logging.info(f"Context type: {type(context).__name__}")
@@ -770,7 +771,7 @@ def create_aws_storage_migration(context) -> str:
                         # Auto-generate endpoint name with GUID
                         import uuid
                         endpoint_guid = str(uuid.uuid4())[:8]  # Use first 8 chars of GUID
-                        src_endpt_creation_final_endpoint_name = f"source-{endpoint_guid}"
+                        source_endpoint_name = f"source-{endpoint_guid}"
 
                         # Extract base connector ID
                         multicloud_connector_id = extract_multicloud_connector_id(connector_id)
@@ -791,13 +792,13 @@ def create_aws_storage_migration(context) -> str:
                         # Create the source endpoint using REST api call
                         try:
                             storage_mover_api_version = "2025-01-01-preview"
-                            source_endpoint_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/endpoints/{src_endpt_creation_final_endpoint_name}?api-version={storage_mover_api_version}"
+                            source_endpoint_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/endpoints/{source_endpoint_name}?api-version={storage_mover_api_version}"
 
                             source_endpoint_creation_response = requests.put(source_endpoint_creation_url, headers=headers, json=source_data_endpoint_payload)
 
                             if source_endpoint_creation_response.status_code in [200, 201]:
                                  source_endpoint_data = source_endpoint_creation_response.json()
-                                 logging.info(f"[Source-Endpoint-Creation] Successfully created source endpoint: {src_endpt_creation_final_endpoint_name}")
+                                 logging.info(f"[Source-Endpoint-Creation] Successfully created source endpoint: {source_endpoint_name}")
                             else:
                                 logging.error(f"[Source-Endpoint-Creation] Failed to create source endpoint: {source_endpoint_creation_response.status_code}, {source_endpoint_creation_response.text}")
                                 return json.dumps({
@@ -863,6 +864,50 @@ def create_aws_storage_migration(context) -> str:
                         ############################ STEP 6 END #######################################
 
 
+                        ################################################################################
+                        ########################### STEP 7: Create Job Definition ######################
+                        ################################################################################
+
+                        job_definition_name = f"{name}-{str(uuid.uuid4())[:8]}"
+                        project_name = project_data.name
+                        
+                        job_def_creation_payload = {
+                            "properties": {
+                                "copyMode": "Additive",
+                                "jobType": "CloudToCloud",
+                                "sourceName": source_endpoint_name,
+                                "sourceSubpath": "/",
+                                "targetName": target_endpoint_name,
+                                "targetSubpath": "/"
+                            }
+                        }
+
+                        job_def_creation_api_version = "2025-01-01-preview"
+                        job_def_creation_url = f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{storage_mover_name}/projects/{project_name}/jobDefinitions/{job_definition_name}?api-version={job_def_creation_api_version}"
+
+                        try:
+                            job_def_creation_response = requests.put(job_def_creation_url, headers=headers, json=job_def_creation_payload)
+
+                            if job_def_creation_response.status_code in [200, 201]:
+                                 job_definition_data = job_def_creation_response.json()
+                                 logging.info(f"[Job-Definition-Creation] Successfully created job definition: {job_definition_name}")
+                            else:
+                                logging.error(f"[Job-Definition-Creation] Failed to create job definition: {job_def_creation_response.status_code}, {job_def_creation_response.text}")
+                                return json.dumps({
+                                    "error": f"Job definition creation failed: {job_def_creation_response.status_code}, {job_def_creation_response.text}",
+                                    "status": "Failed"
+                                }, indent=2)
+                            
+                        except Exception as ex:
+                            logging.error(f"[Job-Definition-Creation] Exception creating job definition: {str(ex)}")
+                            return json.dumps({
+                                "error": f"Job definition creation exception: {str(ex)}",
+                                "status": "Failed"
+                            }, indent=2)
+
+                        ############################ STEP 7 END #######################################
+
+
                     except Exception as ex:
                         logging.error(f"Error while performing aws migration tool steps: {str(ex)}")
                         return json.dumps({
@@ -893,6 +938,7 @@ def create_aws_storage_migration(context) -> str:
             response['container_data'] = container_data # as_dict() not applicable, already a dict
             response['source_endpoint_data'] = source_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['target_endpoint_data'] = target_endpoint_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
+            response['job_definition_data'] = job_definition_data # as_dict() not applicable, already a dict since we are using REST API and not SDK
             response['success'] = True
             
             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
