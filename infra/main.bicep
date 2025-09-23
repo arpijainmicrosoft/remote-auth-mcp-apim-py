@@ -35,7 +35,7 @@ param serviceTreeId string
 @minLength(1)
 @maxLength(64)
 @description('Give a unique app name for your MCP server.')
-param mcpServerAppName string
+param mcpServerName string
 
 param vnetEnabled bool
 param apiServiceName string = ''
@@ -52,7 +52,8 @@ param disableLocalAuth bool = true
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
-var functionAppName = !empty(apiServiceName) ? apiServiceName : '${abbrs.webSitesFunctions}api-${resourceToken}'
+// var functionAppName = !empty(apiServiceName) ? apiServiceName : '${abbrs.webSitesFunctions}api-${resourceToken}'
+var functionAppName = '${mcpServerName}-func-api'
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(toLower(uniqueString(functionAppName, resourceToken)), 7)}'
 
 // Organize resources in a resource group
@@ -63,7 +64,8 @@ resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
 }
 
 var apimResourceToken = toLower(uniqueString(subscription().id, resourceGroupName, environmentName, location))
-var apiManagementName = '${abbrs.apiManagementService}${apimResourceToken}'
+// var apiManagementName = '${abbrs.apiManagementService}${apimResourceToken}'
+var apiManagementName = '${mcpServerName}-apim'
 
 // apim service deployment
 module apimService './core/apim/apim.bicep' = {
@@ -103,11 +105,11 @@ module oauthAPIModule './app/apim-oauth/oauth.bicep' = {
   params: {
     location: location
     entraResourceAppUniqueName: 'mcp-obo-resource-oauth--${abbrs.applications}${apimResourceToken}'
-    entraResourceAppDisplayName: mcpServerAppName
+    entraResourceAppDisplayName: mcpServerName
     apimServiceName: apimService.name
     entraAppUserAssignedIdentityPrincipleId: apimService.outputs.entraAppUserAssignedIdentityPrincipleId
     entraAppUserAssignedIdentityClientId: apimService.outputs.entraAppUserAssignedIdentityClientId
-    mcpServerName: mcpServerAppName
+    mcpServerName: mcpServerName
     cosmosDbEndpoint: cosmosDb.outputs.cosmosDbEndpoint
     cosmosDbDatabaseName: cosmosDb.outputs.databaseName
     cosmosDbContainerName: cosmosDb.outputs.containerName
