@@ -219,287 +219,64 @@ cca_auth_client_using_static_secret = msal.ConfidentialClientApplication(
 @app.generic_trigger(
     arg_name="context",
     type="mcpToolTrigger",
-    toolName="list_resource_groups",
-    description="List all resource groups in the specified subscription.",
-    toolProperties="[]",
-    # toolProperties="[{\"name\": \"subscription_id\", \"description\": \"Azure subscription ID (GUID format)\", \"type\": \"string\", \"required\": true}]",
-)
-def list_resource_groups(context) -> str:
-    """
-    List all resource groups in the specified subscription.
-    
-    Args:
-        context: The trigger context as a JSON string containing the request information.
-                Expected to contain 'subscription_id' in the arguments.
-        
-    Returns:
-        JSON string with list of resource groups or error information.
-    """
-    
-    token_error = None
-    resource_group_data = None
-    
-    try:
-        logging.info(f"Context type: {type(context).__name__}")
-        try:
-            context_obj = json.loads(context)
-            arguments = context_obj.get('arguments', {})
-            bearer_token = None
-            subscription_id = None
-            logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
-            
-            if isinstance(arguments, dict):
-                bearer_token = arguments.get('bearerToken')
-                # subscription_id = arguments.get('subscription_id')
-                subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
-            
-            if not bearer_token:
-                logging.warning("No bearer token found in context arguments")
-                token_acquired = False
-                token_error = "No bearer token found in context arguments"
-            elif not subscription_id:
-                logging.warning("No subscription_id found in context arguments")
-                return json.dumps({
-                    "error": "Missing required parameter: subscription_id",
-                    "status": "Failed"
-                }, indent=2)
-            else:
-                expected_audience = f"{application_cid}"
-                is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
-                
-                if is_valid:
-                    # Use static secret based client for token acquisition.
-                    # Not using the OBO flow here because admin consent is not provided for the app.
-                    # "error": "AADSTS65001: The user or administrator has not consented to use the application with ID 'ddad3aee-d646-4ccc-a3ae-acc9f2ff237f' named 'arpijainmcp05'. Send an interactive authorization request for this user and resource. Trace ID: cdc64abe-5053-4788-a2f9-2d93c1e7de00 Correlation ID: f999d0be-b438-4cbf-a902-e577e8cad657 Timestamp: 2025-09-19 08:25:30Z"
-                    result = cca_auth_client_using_static_secret.acquire_token_for_client(
-                        scopes=['https://management.azure.com/.default']
-                    )
-                else:
-                    token_acquired = False
-                    token_error = validation_error
-                    result = {"error": "invalid_token", "error_description": validation_error}
-                
-                if "access_token" in result:
-                    logging.info("Successfully acquired access token using OBO flow")
-                    token_acquired = True
-                    access_token = result["access_token"]
-                    token_error = None
-                    
-                    # Use the token to call Resource Management API
-                    try:
-                        # Create an authentication object for Resouce Management
-                        headers = {
-                            'Authorization': f'Bearer {access_token}',
-                            'Content-Type': 'application/json'
-                        }
-                        
-                        # Get the resource groups
-                        resource_groups_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourcegroups?api-version=2021-04-01'
-                        response = requests.get(resource_groups_url, headers=headers)
-                        
-                        if response.status_code == 200:
-                            resource_group_data = response.json()
-                            logging.info("Successfully retrieved resource group data")
-                        else:
-                            logging.error(f"Failed to get resource group data: {response.status_code}, {response.text}")
-                            token_error = f"Resource Management API error: {response.status_code}"
-                    except Exception as ex:
-                        logging.error(f"Error calling Resource Management API: {str(ex)}")
-                        token_error = f"Resoure Management error: {str(ex)}"
-                else:
-                    token_acquired = False
-                    token_error = result.get('error_description', 'Unknown error acquiring token')
-                    logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
-        except Exception as e:
-            token_acquired = False
-            token_error = str(e)
-            logging.error(f"Exception when acquiring token: {token_error}")
-
-        # Prepare the response
-        try:
-            response = {}
-            
-            if resource_group_data:
-                # Return resource group data as the primary content
-                response = resource_group_data
-                # Add status information
-                response['success'] = True
-            else:
-                # If we failed to get resource group data, return error information
-                response['success'] = False
-                response['error'] = token_error or "Failed to retrieve resource group data"
-            
-            logging.info(f"Returning response: {json.dumps(response)[:500]}...")
-            return json.dumps(response, indent=2)
-        except Exception as format_error:
-            logging.error(f"Error formatting response: {str(format_error)}")
-            return json.dumps({
-                "success": False,
-                "error": f"Error formatting response: {str(format_error)}"
-            }, indent=2)
-    except Exception as e:
-        stack_trace = traceback.format_exc()
-        return json.dumps({
-            "error": f"An error occurred: {str(e)}\n{stack_trace}",
-            "stack_trace": stack_trace,
-            "raw_context": str(context)
-        }, indent=2)
-    
-@app.generic_trigger(
-    arg_name="context",
-    type="mcpToolTrigger",
-    toolName="create_storage_mover",
-    description="Create a StorageMover resource with the specified parameters using Azure SDK.",
-    toolProperties="[]",
-)
-def create_storage_mover(context) -> str:
-    """
-    Create a StorageMover resource with the specified parameters using Azure SDK.
-    
-    Args:
-        context: The trigger context as a JSON string containing the request information.
-                Expected to contain 'subscription_id' in the arguments.
-        
-    Returns:
-        JSON string with resource creation details, error information, or parameter guidance.
-    """
-    
-    token_error = None
-    resource_group_data = None
-    
-    try:
-        logging.info(f"Context type: {type(context).__name__}")
-        try:
-            context_obj = json.loads(context)
-            arguments = context_obj.get('arguments', {})
-            bearer_token = None
-            subscription_id = None
-            name = None
-            location = None
-            resource_group = None
-            logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
-            
-            if isinstance(arguments, dict):
-                bearer_token = arguments.get('bearerToken')
-                # subscription_id = arguments.get('subscription_id')
-                subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
-                name = 'arpijain-hackathon-mover-01'
-                location = 'eastus'
-                resource_group = 'sunidhi'
-            
-            if not bearer_token:
-                logging.warning("No bearer token found in context arguments")
-                token_acquired = False
-                token_error = "No bearer token found in context arguments"
-            elif not subscription_id:
-                logging.warning("No subscription_id found in context arguments")
-                return json.dumps({
-                    "error": "Missing required parameter: subscription_id",
-                    "status": "Failed"
-                }, indent=2)
-            else:
-                expected_audience = f"{application_cid}"
-                is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
-                
-                if is_valid:
-                    # Use static secret based client for token acquisition.
-                    # Not using the OBO flow here because admin consent is not provided for the app.
-                    # "error": "AADSTS65001: The user or administrator has not consented to use the application with ID 'ddad3aee-d646-4ccc-a3ae-acc9f2ff237f' named 'arpijainmcp05'. Send an interactive authorization request for this user and resource. Trace ID: cdc64abe-5053-4788-a2f9-2d93c1e7de00 Correlation ID: f999d0be-b438-4cbf-a902-e577e8cad657 Timestamp: 2025-09-19 08:25:30Z"
-                    result = cca_auth_client_using_static_secret.acquire_token_for_client(
-                        scopes=['https://management.azure.com/.default']
-                    )
-                else:
-                    token_acquired = False
-                    token_error = validation_error
-                    result = {"error": "invalid_token", "error_description": validation_error}
-                
-                if "access_token" in result:
-                    logging.info("Successfully acquired access token using OBO flow")
-                    token_acquired = True
-                    access_token = result["access_token"]
-                    token_error = None
-                    
-                    # Use the token to call Resource Management API
-                    try:
-                        # Create an authentication object for Resouce Management
-                        headers = {
-                            'Authorization': f'Bearer {access_token}',
-                            'Content-Type': 'application/json'
-                        }
-                        
-                        # Define the Storage Mover resource body
-                        storage_mover_body = {
-                            "location": location,
-                            "tags": {
-                                "created_by": "mcp_tool",
-                                "purpose": "hackathon"
-                            },
-                            "properties": {
-                                "description": f"Storage Mover created via MCP tool for hackathon"
-                            }
-                        }
-                        
-                        # Create the Storage Mover using REST API
-                        # API reference: https://docs.microsoft.com/en-us/rest/api/storagemover/storage-movers/create-or-update
-                        storage_mover_url = f'https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.StorageMover/storageMovers/{name}?api-version=2023-10-01'
-                        
-                        logging.info(f"Creating Storage Mover at URL: {storage_mover_url}")
-                        response = requests.put(storage_mover_url, headers=headers, json=storage_mover_body)
-                        
-                        if response.status_code == 200:
-                            resource_group_data = response.json()
-                            logging.info("Successfully retrieved resource group data")
-                        else:
-                            logging.error(f"Failed to get resource group data: {response.status_code}, {response.text}")
-                            token_error = f"Resource Management API error: {response.status_code}"
-                    except Exception as ex:
-                        logging.error(f"Error calling Resource Management API: {str(ex)}")
-                        token_error = f"Resoure Management error: {str(ex)}"
-                else:
-                    token_acquired = False
-                    token_error = result.get('error_description', 'Unknown error acquiring token')
-                    logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
-        except Exception as e:
-            token_acquired = False
-            token_error = str(e)
-            logging.error(f"Exception when acquiring token: {token_error}")
-
-        # Prepare the response
-        try:
-            response = {}
-            
-            if resource_group_data:
-                # Return resource group data as the primary content
-                response = resource_group_data
-                # Add status information
-                response['success'] = True
-            else:
-                # If we failed to get resource group data, return error information
-                response['success'] = False
-                response['error'] = token_error or "Failed to retrieve resource group data"
-            
-            logging.info(f"Returning response: {json.dumps(response)[:500]}...")
-            return json.dumps(response, indent=2)
-        except Exception as format_error:
-            logging.error(f"Error formatting response: {str(format_error)}")
-            return json.dumps({
-                "success": False,
-                "error": f"Error formatting response: {str(format_error)}"
-            }, indent=2)
-    except Exception as e:
-        stack_trace = traceback.format_exc()
-        return json.dumps({
-            "error": f"An error occurred: {str(e)}\n{stack_trace}",
-            "stack_trace": stack_trace,
-            "raw_context": str(context)
-        }, indent=2)
-
-@app.generic_trigger(
-    arg_name="context",
-    type="mcpToolTrigger",
     toolName="create_aws_storage_migration",
     description="Create a StorageMover resource to move data from AWS S3 to Azure Blob Storage.",
-    toolProperties="[]",
+    toolProperties='[' \
+    '{' \
+        '"propertyName":"subscription_id",' \
+        '"propertyType":"string",' \
+        '"description":"Subscription ID for the Azure subscription for destination of data movement.",' \
+        '"required":true' \
+    '},' \
+    # '{' \
+    #     '"propertyName":"resource_group_name",' \
+    #     '"propertyType":"string",' \
+    #     '"description":"Name of the Azure resource group where resources will be created.",' \
+    #     '"required":true' \
+    # '},' \
+    '{' \
+        '"propertyName":"location",' \
+        '"propertyType":"string",' \
+        '"description":"Azure region where resources will be deployed (e.g., eastus, westus2).",' \
+        '"required":true' \
+    '},' \
+    '{' \
+        '"propertyName":"aws_account_id",' \
+        '"propertyType":"string",' \
+        '"description":"AWS account ID containing the source S3 bucket.",' \
+        '"required":true' \
+    '},' \
+    '{' \
+        '"propertyName":"bucket_name",' \
+        '"propertyType":"string",' \
+        '"description":"Name of the AWS S3 bucket to migrate from.",' \
+        '"required":true' \
+    '},' \
+    # '{' \
+    #     '"propertyName":"connector_id",' \
+    #     '"propertyType":"string",' \
+    #     '"description":"Resource ID of the Azure Arc multicloud connector for AWS integration.",' \
+    #     '"required":true' \
+    # '},' \
+    '{' \
+        '"propertyName":"storage_account_name",' \
+        '"propertyType":"string",' \
+        '"description":"Name for the new Azure storage account (if not provided, will be auto-generated).",' \
+        '"required":false' \
+    '},' \
+    '{' \
+        '"propertyName":"container_name",' \
+        '"propertyType":"string",' \
+        '"description":"Name for the blob container in the storage account.",' \
+        '"required":false' \
+    '},' \
+    '{' \
+        '"propertyName":"enable_auto_trigger",' \
+        '"propertyType":"boolean",' \
+        '"description":"Whether to automatically start the migration job after setup.",' \
+        '"required":false' \
+    '}' \
+']',
 )
 def create_aws_storage_migration(context) -> str:
     """
@@ -509,9 +286,12 @@ def create_aws_storage_migration(context) -> str:
     Optionally creates an Azure Arc multicloud connector for AWS integration.
     Optionally creates an AWS S3 source endpoint for the Storage Mover.
     
-    Args:
-        context: The trigger context as a JSON string containing the request information.
-                Expected to contain 'subscription_id' in the arguments.
+    Expects the MCP invocation context to include:
+      - arguments.subscription_id : Subscription ID for the Azure subscription for destination of data movement.
+      - arguments.location : Azure region where resources will be deployed (e.g., eastus, westus2).
+      - arguments.aws_account_id : AWS account ID containing the source S3 bucket.
+      - arguments.bucket_name : Name of the AWS S3 bucket to migrate from.
+      - arguments.bearerToken     : (injected by APIM policy) encrypted-session derived access token
         
     Returns:
         JSON string with resource creation details, error information, or parameter guidance.
@@ -547,18 +327,45 @@ def create_aws_storage_migration(context) -> str:
             if isinstance(arguments, dict):
                 bearer_token = arguments.get('bearerToken')
                 datetimeSuffix = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-                subscription_id = '32758ed5-6e7b-4f7a-90ac-e60d869ce968'
-                name = f"arpijain-hackathon-mover-{datetimeSuffix}"
-                location = 'eastus'
-                resource_group = 'arpijain-aws-storage-mover-test-01'
+                subscription_id = arguments.get('subscription_id') if isinstance(arguments, dict) else None
+                name = f"aws-to-azure-storage-mover-{datetimeSuffix}"
+                # location = 'eastus'
+                location = arguments.get('location') if isinstance(arguments, dict) else None
+                resource_group = 'aws-to-azure-storage-mover-rg'
                 connector_id = "/subscriptions/32758ed5-6e7b-4f7a-90ac-e60d869ce968/resourceGroups/sunidhi/providers/Microsoft.HybridConnectivity/publicCloudConnectors/connector1/providers/Microsoft.HybridConnectivity/solutionConfigurations/storageMover"
-                aws_account_id = '332061897005'
-                bucket_name = 'sunidhibucket1'
+                # aws_account_id = '332061897005'
+                # bucket_name = 'sunidhibucket1'
+                aws_account_id = arguments.get('aws_account_id') if isinstance(arguments, dict) else None
+                bucket_name = arguments.get('bucket_name') if isinstance(arguments, dict) else None
 
             if not bearer_token:
                 logging.warning("No bearer token found in context arguments")
                 return json.dumps({
                     "error": "No bearer token found in context arguments",
+                    "status": "Failed"
+                }, indent=2)
+            elif not subscription_id:
+                logging.warning("No subscription ID found in context arguments")
+                return json.dumps({
+                    "error": "No subscription ID found in context arguments",
+                    "status": "Failed"
+                }, indent=2)
+            elif not location:
+                logging.warning("No location found in context arguments")
+                return json.dumps({
+                    "error": "No location found in context arguments",
+                    "status": "Failed"
+                }, indent=2)
+            elif not aws_account_id:
+                logging.warning("No AWS account ID found in context arguments")
+                return json.dumps({
+                    "error": "No AWS account ID found in context arguments",
+                    "status": "Failed"
+                }, indent=2)
+            elif not bucket_name:
+                logging.warning("No AWS S3 bucket name found in context arguments")
+                return json.dumps({
+                    "error": "No AWS S3 bucket name found in context arguments",
                     "status": "Failed"
                 }, indent=2)
             else:
@@ -607,7 +414,7 @@ def create_aws_storage_migration(context) -> str:
                             subscription_id=subscription_id
                         )
                         
-                        # Define the Storage Mover properties                        
+                        # Define the Storage Mover properties
                         from azure.mgmt.storagemover.models import StorageMover  # Import locally to avoid module-level issues
                         storage_mover_properties = StorageMover(
                             location=location,
@@ -1085,122 +892,122 @@ def create_aws_storage_migration(context) -> str:
             "raw_context": str(context)
         }, indent=2)
 
-@app.generic_trigger(
-    arg_name="context",
-    type="mcpToolTrigger",
-    toolName="get_graph_user_details",
-    description="Get user details from Microsoft Graph.",
-    toolProperties="[]",
-)
-def get_graph_user_details(context) -> str:
-    """
-    Gets user details from Microsoft Graph using the bearer token.
+# @app.generic_trigger(
+#     arg_name="context",
+#     type="mcpToolTrigger",
+#     toolName="get_graph_user_details",
+#     description="Get user details from Microsoft Graph.",
+#     toolProperties="[]",
+# )
+# def get_graph_user_details(context) -> str:
+#     """
+#     Gets user details from Microsoft Graph using the bearer token.
     
-    Args:
-        context: The trigger context as a JSON string containing the request information.
+#     Args:
+#         context: The trigger context as a JSON string containing the request information.
         
-    Returns:
-        str: JSON containing the user details from Microsoft Graph.
-    """
+#     Returns:
+#         str: JSON containing the user details from Microsoft Graph.
+#     """
     
-    token_error = None
-    user_data = None
+#     token_error = None
+#     user_data = None
     
-    try:
-        logging.info(f"Context type: {type(context).__name__}")
-        try:
-            context_obj = json.loads(context)
-            arguments = context_obj.get('arguments', {})
-            bearer_token = None
-            logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
+#     try:
+#         logging.info(f"Context type: {type(context).__name__}")
+#         try:
+#             context_obj = json.loads(context)
+#             arguments = context_obj.get('arguments', {})
+#             bearer_token = None
+#             logging.info(f"Arguments structure: {json.dumps(arguments)[:500]}")
             
-            if isinstance(arguments, dict):
-                bearer_token = arguments.get('bearerToken')
+#             if isinstance(arguments, dict):
+#                 bearer_token = arguments.get('bearerToken')
             
-            if not bearer_token:
-                logging.warning("No bearer token found in context arguments")
-                token_acquired = False
-                token_error = "No bearer token found in context arguments"
-            else:
-                expected_audience = f"{application_cid}"
-                is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
+#             if not bearer_token:
+#                 logging.warning("No bearer token found in context arguments")
+#                 token_acquired = False
+#                 token_error = "No bearer token found in context arguments"
+#             else:
+#                 expected_audience = f"{application_cid}"
+#                 is_valid, validation_error, decoded_token = validate_bearer_token(bearer_token, expected_audience)
                 
-                if is_valid:
-                    # Use On-Behalf-Of flow with the validated user's token
-                    result = cca_auth_client.acquire_token_on_behalf_of(
-                        user_assertion=bearer_token,
-                        scopes=['https://graph.microsoft.com/.default']
-                    )
-                else:
-                    token_acquired = False
-                    token_error = validation_error
-                    result = {"error": "invalid_token", "error_description": validation_error}
+#                 if is_valid:
+#                     # Use On-Behalf-Of flow with the validated user's token
+#                     result = cca_auth_client.acquire_token_on_behalf_of(
+#                         user_assertion=bearer_token,
+#                         scopes=['https://graph.microsoft.com/.default']
+#                     )
+#                 else:
+#                     token_acquired = False
+#                     token_error = validation_error
+#                     result = {"error": "invalid_token", "error_description": validation_error}
                 
-                if "access_token" in result:
-                    logging.info("Successfully acquired access token using OBO flow")
-                    token_acquired = True
-                    access_token = result["access_token"]
-                    token_error = None
+#                 if "access_token" in result:
+#                     logging.info("Successfully acquired access token using OBO flow")
+#                     token_acquired = True
+#                     access_token = result["access_token"]
+#                     token_error = None
                     
-                    # Use the token to call Microsoft Graph API
-                    try:
-                        # Create an authentication object for Microsoft Graph
-                        headers = {
-                            'Authorization': f'Bearer {access_token}',
-                            'Content-Type': 'application/json'
-                        }
+#                     # Use the token to call Microsoft Graph API
+#                     try:
+#                         # Create an authentication object for Microsoft Graph
+#                         headers = {
+#                             'Authorization': f'Bearer {access_token}',
+#                             'Content-Type': 'application/json'
+#                         }
                         
-                        # Get the user profile information
-                        graph_url = 'https://graph.microsoft.com/v1.0/me'
-                        response = requests.get(graph_url, headers=headers)
+#                         # Get the user profile information
+#                         graph_url = 'https://graph.microsoft.com/v1.0/me'
+#                         response = requests.get(graph_url, headers=headers)
                         
-                        if response.status_code == 200:
-                            user_data = response.json()
-                            logging.info("Successfully retrieved user data from Microsoft Graph")
-                        else:
-                            logging.error(f"Failed to get user data: {response.status_code}, {response.text}")
-                            token_error = f"Graph API error: {response.status_code}"
-                    except Exception as graph_error:
-                        logging.error(f"Error calling Graph API: {str(graph_error)}")
-                        token_error = f"Graph API error: {str(graph_error)}"
-                else:
-                    token_acquired = False
-                    token_error = result.get('error_description', 'Unknown error acquiring token')
-                    logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
-        except Exception as e:
-            token_acquired = False
-            token_error = str(e)
-            logging.error(f"Exception when acquiring token: {token_error}")
+#                         if response.status_code == 200:
+#                             user_data = response.json()
+#                             logging.info("Successfully retrieved user data from Microsoft Graph")
+#                         else:
+#                             logging.error(f"Failed to get user data: {response.status_code}, {response.text}")
+#                             token_error = f"Graph API error: {response.status_code}"
+#                     except Exception as graph_error:
+#                         logging.error(f"Error calling Graph API: {str(graph_error)}")
+#                         token_error = f"Graph API error: {str(graph_error)}"
+#                 else:
+#                     token_acquired = False
+#                     token_error = result.get('error_description', 'Unknown error acquiring token')
+#                     logging.warning(f"Failed to acquire token using OBO flow: {token_error}")
+#         except Exception as e:
+#             token_acquired = False
+#             token_error = str(e)
+#             logging.error(f"Exception when acquiring token: {token_error}")
 
-        # Prepare the response
-        try:
-            response = {}
+#         # Prepare the response
+#         try:
+#             response = {}
             
-            if user_data:
-                # Return user data as the primary content
-                response = user_data
-                # Add status information
-                response['success'] = True
-            else:
-                # If we failed to get user data, return error information
-                response['success'] = False
-                response['error'] = token_error or "Failed to retrieve user data"
+#             if user_data:
+#                 # Return user data as the primary content
+#                 response = user_data
+#                 # Add status information
+#                 response['success'] = True
+#             else:
+#                 # If we failed to get user data, return error information
+#                 response['success'] = False
+#                 response['error'] = token_error or "Failed to retrieve user data"
             
-            logging.info(f"Returning response: {json.dumps(response)[:500]}...")
-            return json.dumps(response, indent=2)
-        except Exception as format_error:
-            logging.error(f"Error formatting response: {str(format_error)}")
-            return json.dumps({
-                "success": False,
-                "error": f"Error formatting response: {str(format_error)}"
-            }, indent=2)
-    except Exception as e:
-        stack_trace = traceback.format_exc()
-        return json.dumps({
-            "error": f"An error occurred: {str(e)}\n{stack_trace}",
-            "stack_trace": stack_trace,
-            "raw_context": str(context)
-        }, indent=2)
+#             logging.info(f"Returning response: {json.dumps(response)[:500]}...")
+#             return json.dumps(response, indent=2)
+#         except Exception as format_error:
+#             logging.error(f"Error formatting response: {str(format_error)}")
+#             return json.dumps({
+#                 "success": False,
+#                 "error": f"Error formatting response: {str(format_error)}"
+#             }, indent=2)
+#     except Exception as e:
+#         stack_trace = traceback.format_exc()
+#         return json.dumps({
+#             "error": f"An error occurred: {str(e)}\n{stack_trace}",
+#             "stack_trace": stack_trace,
+#             "raw_context": str(context)
+#         }, indent=2)
 
 def get_managed_identity_token(audience):
     token = mi_auth_client.acquire_token_for_client(resource=audience)

@@ -104,6 +104,7 @@ resource OAuthScopesNamedValue 'Microsoft.ApiManagement/service/namedValues@2021
   properties: {
     displayName: 'OAuthScopes'
     value: 'User.Read'  // Show the actual downstream scopes that the API will request
+    // value: 'user_impersonation' // Ideally we want to be able to use the user_impersonation scope, but MSFT tenant does not allow using it
     secret: false
   }
 }

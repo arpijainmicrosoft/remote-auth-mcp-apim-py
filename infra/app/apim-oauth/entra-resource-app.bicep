@@ -30,6 +30,7 @@ resource entraResourceApp 'Microsoft.Graph/applications@v1.0' = {
   web: {
     redirectUris: [
       apimOauthCallback
+      'http://localhost:33418' // For integration with VSCode
     ]
   }
   requiredResourceAccess: [
